@@ -1,0 +1,9 @@
+note.md
+*.db
+*.spec
+build
+dist
+env
+fonts
+fonts\Noto_Sans_Myanmar 
+fonts\Noto_Sans_Myanmar\*
