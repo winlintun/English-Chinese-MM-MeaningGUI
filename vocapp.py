@@ -74,8 +74,10 @@ class VocabApp:
     def __init__(self, root):
         self.root = root
         self.editing_id = None
-        self.root.title("English Vocabulary Manager")
-        self.root.geometry("750x500")
+        self.root.title("VocApp | Vocabulary Workspace")
+        self.root.geometry("980x680")
+        self.root.minsize(820, 560)
+        self.root.configure(bg="#eef2f6")
 
         self.myanmar_font_family, self.myanmar_font_file = get_myanmar_font_family()
         if self.myanmar_font_file:
@@ -88,50 +90,93 @@ class VocabApp:
             configure_default_fonts(root, self.myanmar_font_family)
 
         style = ttk.Style()
-        style.configure("Treeview", font=self.myanmar_font, rowheight=28)
-        style.configure("Treeview.Heading", font=self.heading_font)
+        style.theme_use("clam")
+        style.configure("App.TFrame", background="#eef2f6")
+        style.configure("Header.TFrame", background="#17324d")
+        style.configure("Card.TLabelframe", background="#ffffff", bordercolor="#d7e0e8", relief="solid")
+        style.configure("Card.TLabelframe.Label", background="#ffffff", foreground="#17324d", font=self.heading_font)
+        style.configure("Title.TLabel", background="#17324d", foreground="#ffffff", font=(self.myanmar_font_family, 22, "bold"))
+        style.configure("Subtitle.TLabel", background="#17324d", foreground="#b9c9d8", font=(self.myanmar_font_family, 10))
+        style.configure("Section.TLabel", background="#ffffff", foreground="#526579", font=self.heading_font)
+        style.configure("Muted.TLabel", background="#eef2f6", foreground="#6b7b8c", font=(self.myanmar_font_family, 10))
+        style.configure("Accent.TButton", background="#0f766e", foreground="#ffffff", padding=(14, 8), font=self.heading_font)
+        style.map("Accent.TButton", background=[("active", "#0b5f59")])
+        style.configure("Soft.TButton", background="#e8eef3", foreground="#17324d", padding=(12, 8))
+        style.map("Soft.TButton", background=[("active", "#d6e1e9")])
+        style.configure("Danger.TButton", background="#fbe9e7", foreground="#a33a2b", padding=(12, 8))
+        style.map("Danger.TButton", background=[("active", "#f4d5d0")])
+        style.configure("Treeview", background="#ffffff", fieldbackground="#ffffff", foreground="#263746", font=self.myanmar_font, rowheight=34, borderwidth=0)
+        style.map("Treeview", background=[("selected", "#d8eeeb")], foreground=[("selected", "#17324d")])
+        style.configure("Treeview.Heading", background="#e8eef3", foreground="#17324d", font=self.heading_font, padding=(8, 9))
+        style.configure("TEntry", fieldbackground="#f8fafc", foreground="#263746", padding=8)
 
-        # ---- Input frame ----
-        frame = ttk.LabelFrame(root, text="Add New Word", padding=10)
-        frame.pack(fill="x", padx=10, pady=5)
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(2, weight=1)
 
-        ttk.Label(frame, text="English:").grid(row=1, column=0, sticky="w", pady=2)
-        self.ent_eng = tk.Entry(frame, width=30, font=self.myanmar_font)
-        self.ent_eng.grid(row=1, column=1, padx=5, pady=2, sticky="w")
+        header = ttk.Frame(root, style="Header.TFrame", padding=(28, 22))
+        header.grid(row=0, column=0, sticky="ew")
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text="VocApp", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text="Build your vocabulary, one word at a time", style="Subtitle.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(header, text="WORD LIBRARY", style="Subtitle.TLabel").grid(row=0, column=1, rowspan=2, sticky="e")
 
-        ttk.Label(frame, text="Myanmar:").grid(row=2, column=0, sticky="w", pady=2)
-        self.ent_mm = tk.Entry(frame, width=30, font=self.myanmar_font)
-        self.ent_mm.grid(row=2, column=1, padx=5, pady=2, sticky="w")
+        editor = ttk.LabelFrame(root, text="  Word details  ", style="Card.TLabelframe", padding=(18, 14))
+        editor.grid(row=1, column=0, sticky="ew", padx=24, pady=(20, 12))
+        editor.columnconfigure(0, weight=1)
+        editor.columnconfigure(1, weight=1)
+        editor.columnconfigure(2, weight=1)
 
-        ttk.Label(frame, text="Chinese:").grid(row=3, column=0, sticky="w", pady=2)
-        self.ent_cn = tk.Entry(frame, width=30, font=self.myanmar_font)
-        self.ent_cn.grid(row=3, column=1, padx=5, pady=2, sticky="w")
+        ttk.Label(editor, text="English", style="Section.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 12))
+        ttk.Label(editor, text="Myanmar", style="Section.TLabel").grid(row=0, column=1, sticky="w", padx=6)
+        ttk.Label(editor, text="Chinese", style="Section.TLabel").grid(row=0, column=2, sticky="w", padx=(12, 0))
+        self.ent_eng = ttk.Entry(editor, font=self.myanmar_font)
+        self.ent_eng.grid(row=1, column=0, sticky="ew", padx=(0, 12), pady=(5, 0))
+        self.ent_mm = ttk.Entry(editor, font=self.myanmar_font)
+        self.ent_mm.grid(row=1, column=1, sticky="ew", padx=6, pady=(5, 0))
+        self.ent_cn = ttk.Entry(editor, font=self.myanmar_font)
+        self.ent_cn.grid(row=1, column=2, sticky="ew", padx=(12, 0), pady=(5, 0))
 
-        self.save_button = ttk.Button(frame, text="Save", command=self.save_word)
-        self.save_button.grid(row=1, column=2, rowspan=3, padx=10)
-        self.cancel_button = ttk.Button(frame, text="Cancel", command=self.cancel_edit, state="disabled")
-        self.cancel_button.grid(row=1, column=3, rowspan=3, padx=(0, 10))
+        form_actions = ttk.Frame(editor, style="Card.TLabelframe")
+        form_actions.grid(row=0, column=3, rowspan=2, padx=(20, 0))
+        self.save_button = ttk.Button(form_actions, text="Save Word", command=self.save_word, style="Accent.TButton")
+        self.save_button.pack(fill="x")
+        self.cancel_button = ttk.Button(form_actions, text="Cancel Edit", command=self.cancel_edit, state="disabled", style="Soft.TButton")
+        self.cancel_button.pack(fill="x", pady=(7, 0))
 
-        # ---- Search ----
-        ttk.Label(frame, text="Search:").grid(row=4, column=0, sticky="w", pady=(10, 2))
-        self.ent_search = tk.Entry(frame, width=30, font=self.myanmar_font)
-        self.ent_search.grid(row=4, column=1, padx=5, pady=(10, 2), sticky="w")
+        library = ttk.Frame(root, style="App.TFrame", padding=(24, 0, 24, 20))
+        library.grid(row=2, column=0, sticky="nsew")
+        library.columnconfigure(0, weight=1)
+        library.rowconfigure(2, weight=1)
+        toolbar = ttk.Frame(library, style="App.TFrame")
+        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        toolbar.columnconfigure(1, weight=1)
+        ttk.Label(toolbar, text="Your vocabulary", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(toolbar, text="Search", style="Muted.TLabel").grid(row=0, column=1, sticky="e", padx=(20, 8))
+        self.ent_search = ttk.Entry(toolbar, width=30, font=self.myanmar_font)
+        self.ent_search.grid(row=0, column=2, sticky="e")
         self.ent_search.bind("<KeyRelease>", lambda e: self.load_words())
-        ttk.Button(frame, text="Add Chinese to Selected", command=self.add_chinese).grid(row=4, column=2, padx=10, pady=(10, 2))
+        ttk.Button(toolbar, text="Refresh", command=self.load_words, style="Soft.TButton").grid(row=0, column=3, padx=(8, 0))
 
-        # ---- Table ----
+        table_frame = ttk.Frame(library, style="App.TFrame")
+        table_frame.grid(row=2, column=0, sticky="nsew")
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
         cols = ("id", "english", "chinese", "myanmar")
-        self.tree = ttk.Treeview(root, columns=cols, show="headings", height=15)
-        for c, w in zip(cols, (40, 180, 240, 240)):
+        self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="extended")
+        for c, w in zip(cols, (55, 220, 250, 300)):
             self.tree.heading(c, text=c.capitalize())
-            self.tree.column(c, width=w)
-        self.tree.pack(fill="both", expand=True, padx=10, pady=5)
+            self.tree.column(c, width=w, minwidth=55, anchor="w")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=scrollbar.set)
 
-        actions = ttk.Frame(root)
-        actions.pack(fill="x", padx=10, pady=5)
-        ttk.Button(actions, text="Edit Selected", command=self.edit_word).pack(side="left")
-        ttk.Button(actions, text="Delete Selected", command=self.delete_word).pack(side="left", padx=5)
-        ttk.Button(actions, text="Quiz", command=self.open_quiz).pack(side="right")
+        actions = ttk.Frame(library, style="App.TFrame")
+        actions.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        ttk.Button(actions, text="Edit Selected", command=self.edit_word, style="Soft.TButton").pack(side="left")
+        ttk.Button(actions, text="Delete Selected", command=self.delete_word, style="Danger.TButton").pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Add Chinese to Selected", command=self.add_chinese, style="Soft.TButton").pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Open Quiz", command=self.open_quiz, style="Accent.TButton").pack(side="right")
 
         self.load_words()
 
@@ -236,15 +281,23 @@ class VocabApp:
 
     def open_quiz(self):
         quiz = tk.Toplevel(self.root)
-        quiz.title("Vocabulary Quiz")
-        quiz.geometry("700x400")
+        quiz.title("VocApp | Quick Quiz")
+        quiz.geometry("820x500")
+        quiz.minsize(700, 400)
+        quiz.configure(bg="#eef2f6")
 
-        ttk.Label(quiz, text="Random vocabulary items").pack(pady=(10, 2))
-        quiz_tree = ttk.Treeview(quiz, columns=("number", "english", "myanmar", "chinese"), show="headings")
-        for column, width in (("number", 60), ("english", 180), ("myanmar", 220), ("chinese", 180)):
+        quiz_header = ttk.Frame(quiz, style="Header.TFrame", padding=(22, 16))
+        quiz_header.pack(fill="x")
+        ttk.Label(quiz_header, text="Quick Quiz", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(quiz_header, text="A fresh set of 10 words from your library", style="Subtitle.TLabel").pack(anchor="w", pady=(3, 0))
+
+        table_frame = ttk.Frame(quiz, style="App.TFrame", padding=16)
+        table_frame.pack(fill="both", expand=True)
+        quiz_tree = ttk.Treeview(table_frame, columns=("number", "english", "myanmar", "chinese"), show="headings")
+        for column, width in (("number", 60), ("english", 220), ("myanmar", 260), ("chinese", 220)):
             quiz_tree.heading(column, text=column.capitalize())
-            quiz_tree.column(column, width=width)
-        quiz_tree.pack(fill="both", expand=True, padx=10, pady=5)
+            quiz_tree.column(column, width=width, minwidth=60, anchor="w")
+        quiz_tree.pack(fill="both", expand=True)
 
         def refresh_quiz():
             for item in quiz_tree.get_children():
@@ -257,7 +310,7 @@ class VocabApp:
             for number, row in enumerate(rows, start=1):
                 quiz_tree.insert("", "end", values=(number,) + row)
 
-        ttk.Button(quiz, text="Refresh Items", command=refresh_quiz).pack(pady=(0, 10))
+        ttk.Button(quiz, text="Refresh Items", command=refresh_quiz, style="Accent.TButton").pack(pady=(0, 16))
         refresh_quiz()
 
 if __name__ == "__main__":
