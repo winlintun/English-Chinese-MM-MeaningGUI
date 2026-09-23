@@ -7,3 +7,4 @@ env
 fonts
 fonts\Noto_Sans_Myanmar 
 fonts\Noto_Sans_Myanmar\*
+__pycache__

@@ -73,6 +73,7 @@ def init_db():
 class VocabApp:
     def __init__(self, root):
         self.root = root
+        self.editing_id = None
         self.root.title("English Vocabulary Manager")
         self.root.geometry("750x500")
 
@@ -106,7 +107,10 @@ class VocabApp:
         self.ent_cn = tk.Entry(frame, width=30, font=self.myanmar_font)
         self.ent_cn.grid(row=3, column=1, padx=5, pady=2, sticky="w")
 
-        ttk.Button(frame, text="Save", command=self.save_word).grid(row=1, column=2, rowspan=3, padx=10)
+        self.save_button = ttk.Button(frame, text="Save", command=self.save_word)
+        self.save_button.grid(row=1, column=2, rowspan=3, padx=10)
+        self.cancel_button = ttk.Button(frame, text="Cancel", command=self.cancel_edit, state="disabled")
+        self.cancel_button.grid(row=1, column=3, rowspan=3, padx=(0, 10))
 
         # ---- Search ----
         ttk.Label(frame, text="Search:").grid(row=4, column=0, sticky="w", pady=(10, 2))
@@ -123,7 +127,11 @@ class VocabApp:
             self.tree.column(c, width=w)
         self.tree.pack(fill="both", expand=True, padx=10, pady=5)
 
-        ttk.Button(root, text="Delete Selected", command=self.delete_word).pack(pady=5)
+        actions = ttk.Frame(root)
+        actions.pack(fill="x", padx=10, pady=5)
+        ttk.Button(actions, text="Edit Selected", command=self.edit_word).pack(side="left")
+        ttk.Button(actions, text="Delete Selected", command=self.delete_word).pack(side="left", padx=5)
+        ttk.Button(actions, text="Quiz", command=self.open_quiz).pack(side="right")
 
         self.load_words()
 
@@ -156,6 +164,53 @@ class VocabApp:
         self.ent_cn.delete(0, "end")
         self.load_words()
 
+    def edit_word(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("Info", "Please select a word in the table first.")
+            return
+
+        word = self.tree.item(sel[0])["values"]
+        self.ent_eng.delete(0, "end")
+        self.ent_eng.insert(0, word[1])
+        self.ent_cn.delete(0, "end")
+        self.ent_cn.insert(0, word[2])
+        self.ent_mm.delete(0, "end")
+        self.ent_mm.insert(0, word[3])
+        self.editing_id = word[0]
+        self.save_button.configure(text="Update", command=self.update_word)
+        self.cancel_button.configure(state="normal")
+        self.ent_eng.focus_set()
+
+    def update_word(self):
+        eng = normalize_myanmar_text(self.ent_eng.get())
+        mm = normalize_myanmar_text(self.ent_mm.get())
+        cn = normalize_myanmar_text(self.ent_cn.get())
+        if not eng or not mm:
+            messagebox.showwarning("Warning", "English and Myanmar text are required!")
+            return
+
+        conn = sqlite3.connect(DB_FILE)
+        conn.execute(
+            "UPDATE words SET english=?, chinese=?, myanmar=? WHERE id=?",
+            (eng, cn, mm, self.editing_id),
+        )
+        conn.commit()
+        conn.close()
+        self.cancel_edit()
+        self.load_words()
+
+    def cancel_edit(self):
+        self.editing_id = None
+        self.save_button.configure(text="Save", command=self.save_word)
+        self.cancel_button.configure(state="disabled")
+        self.clear_form()
+
+    def clear_form(self):
+        self.ent_eng.delete(0, "end")
+        self.ent_mm.delete(0, "end")
+        self.ent_cn.delete(0, "end")
+
     def delete_word(self):
         sel = self.tree.selection()
         if not sel:
@@ -178,6 +233,32 @@ class VocabApp:
         conn.close()
         for r in rows:
             self.tree.insert("", "end", values=r)
+
+    def open_quiz(self):
+        quiz = tk.Toplevel(self.root)
+        quiz.title("Vocabulary Quiz")
+        quiz.geometry("700x400")
+
+        ttk.Label(quiz, text="Random vocabulary items").pack(pady=(10, 2))
+        quiz_tree = ttk.Treeview(quiz, columns=("number", "english", "myanmar", "chinese"), show="headings")
+        for column, width in (("number", 60), ("english", 180), ("myanmar", 220), ("chinese", 180)):
+            quiz_tree.heading(column, text=column.capitalize())
+            quiz_tree.column(column, width=width)
+        quiz_tree.pack(fill="both", expand=True, padx=10, pady=5)
+
+        def refresh_quiz():
+            for item in quiz_tree.get_children():
+                quiz_tree.delete(item)
+            conn = sqlite3.connect(DB_FILE)
+            rows = conn.execute(
+                "SELECT english, myanmar, chinese FROM words ORDER BY RANDOM() LIMIT 10"
+            ).fetchall()
+            conn.close()
+            for number, row in enumerate(rows, start=1):
+                quiz_tree.insert("", "end", values=(number,) + row)
+
+        ttk.Button(quiz, text="Refresh Items", command=refresh_quiz).pack(pady=(0, 10))
+        refresh_quiz()
 
 if __name__ == "__main__":
     init_db()
