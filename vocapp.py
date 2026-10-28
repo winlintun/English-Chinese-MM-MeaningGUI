@@ -9,7 +9,7 @@ import unicodedata
 import urllib.parse
 import urllib.request
 
-from PySide6.QtCore import Qt, QEvent, QTimer
+from PySide6.QtCore import Qt, QEvent, QObject, QTimer, Signal
 from PySide6.QtGui import QFont, QFontDatabase, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
@@ -371,6 +371,10 @@ QHeaderView::section:hover { background: %(soft_hover)s; }
 """ % COLORS
 
 
+class _LookupSignals(QObject):
+    finished = Signal(str, object, object)
+
+
 class VocabApp(QMainWindow):
     tree_columns = ("id", "english", "chinese", "category", "myanmar")
 
@@ -379,6 +383,13 @@ class VocabApp(QMainWindow):
         self.editing_id = None
         self.sort_col = 0
         self.sort_desc = True
+        self._lookup_inflight = set()
+        self.lookup_signals = _LookupSignals()
+        self.lookup_signals.finished.connect(self._apply_lookup)
+        self._lookup_timer = QTimer(self)
+        self._lookup_timer.setSingleShot(True)
+        self._lookup_timer.setInterval(800)
+        self._lookup_timer.timeout.connect(self._start_lookup)
 
         self.setWindowTitle("VocApp | Vocabulary Workspace")
         self.resize(1060, 700)
@@ -455,6 +466,11 @@ class VocabApp(QMainWindow):
         form.setColumnStretch(2, 3)
         form.setColumnStretch(3, 2)
 
+        self.mm_hint = QLabel("", objectName="hintLabel")
+        self.cn_hint = QLabel("", objectName="hintLabel")
+        form.addWidget(self.mm_hint, 2, 1)
+        form.addWidget(self.cn_hint, 2, 2)
+
         actions = QVBoxLayout()
         actions.setSpacing(7)
         inner.addLayout(actions, 0)
@@ -474,6 +490,9 @@ class VocabApp(QMainWindow):
         self.ent_mm.returnPressed.connect(self.save_word)
         self.ent_cn.returnPressed.connect(self.save_word)
         self.ent_eng.installEventFilter(self)
+        self.ent_eng.textChanged.connect(self._english_changed)
+        self.ent_mm.textChanged.connect(self._mm_typed)
+        self.ent_cn.textChanged.connect(self._cn_typed)
 
         return card
 
@@ -597,7 +616,29 @@ class VocabApp(QMainWindow):
                 return cat
         return CATEGORIES[0]
 
+    def _set_hint(self, label, text, color):
+        label.setText(text)
+        label.setStyleSheet(f"color: {color};" if text else "")
+
+    def _english_changed(self, text):
+        self._set_hint(self.mm_hint, "", "")
+        self._set_hint(self.cn_hint, "", "")
+        if normalize_myanmar_text(text):
+            self._lookup_timer.start()
+        else:
+            self._lookup_timer.stop()
+
+    def _mm_typed(self):
+        self._set_hint(self.mm_hint, "", "")
+
+    def _cn_typed(self):
+        self._set_hint(self.cn_hint, "", "")
+
     def auto_lookup(self):
+        self._lookup_timer.stop()
+        self._start_lookup()
+
+    def _start_lookup(self):
         eng = normalize_myanmar_text(self.ent_eng.text())
         if not eng:
             return
@@ -605,6 +646,13 @@ class VocabApp(QMainWindow):
         needs_cn = not self.ent_cn.text().strip()
         if not needs_mm and not needs_cn:
             return
+        if eng in self._lookup_inflight:
+            return
+        self._lookup_inflight.add(eng)
+        if needs_mm:
+            self._set_hint(self.mm_hint, "Searching online…", COLORS["muted"])
+        if needs_cn:
+            self._set_hint(self.cn_hint, "Searching online…", COLORS["muted"])
         self.status_label.setText(f"Looking up “{eng}” online…")
         threading.Thread(target=self._lookup_worker, args=(eng, needs_mm, needs_cn),
                          daemon=True).start()
@@ -612,22 +660,29 @@ class VocabApp(QMainWindow):
     def _lookup_worker(self, eng, needs_mm, needs_cn):
         mm = lookup_myanmar(eng) if needs_mm else None
         cn = lookup_chinese(eng) if needs_cn else None
-        QTimer.singleShot(0, lambda: self._apply_lookup(eng, mm, cn))
+        self.lookup_signals.finished.emit(eng, mm, cn)
 
     def _apply_lookup(self, eng, mm, cn):
+        self._lookup_inflight.discard(eng)
         if normalize_myanmar_text(self.ent_eng.text()) != eng:
             return
         filled = []
         if mm and not self.ent_mm.text().strip():
             self.ent_mm.setText(normalize_myanmar_text(mm))
+            self._set_hint(self.mm_hint, "Found online ✓", COLORS["accent_dark"])
             filled.append("Myanmar")
+        elif self.mm_hint.text() == "Searching online…":
+            self._set_hint(self.mm_hint, "Not found — add manually", COLORS["danger_text"])
         if cn and not self.ent_cn.text().strip():
             self.ent_cn.setText(cn)
+            self._set_hint(self.cn_hint, "Found online ✓", COLORS["accent_dark"])
             filled.append("Chinese")
+        elif self.cn_hint.text() == "Searching online…":
+            self._set_hint(self.cn_hint, "Not found — add manually", COLORS["danger_text"])
         if filled:
             self.status_label.setText(f"Auto-filled {' & '.join(filled)} for “{eng}”")
         else:
-            self.status_label.setText(f"No online result found for “{eng}”")
+            self.status_label.setText(f"No online result found for “{eng}” — add it manually")
 
     def save_word(self):
         eng = normalize_myanmar_text(self.ent_eng.text())
@@ -721,6 +776,9 @@ class VocabApp(QMainWindow):
         self.ent_eng.clear()
         self.ent_mm.clear()
         self.ent_cn.clear()
+        self._set_hint(self.mm_hint, "", "")
+        self._set_hint(self.cn_hint, "", "")
+        self._lookup_timer.stop()
 
     def delete_word(self):
         items = self.tree.selectedItems()
