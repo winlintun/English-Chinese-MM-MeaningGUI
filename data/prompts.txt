@@ -1,0 +1,2 @@
+i give you english word, you give me translate "Myanmar" and "Chinese" words.
+when i seed you many word, you give me translate each word is two meaning (Myanmar and Chinese) . Note : Use Traditional Chinese
