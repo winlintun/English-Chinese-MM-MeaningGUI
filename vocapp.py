@@ -476,7 +476,7 @@ class VocabApp(QMainWindow):
         inner.addLayout(actions, 0)
 
         self.save_button = QPushButton("Save Word", objectName="accentButton")
-        self.save_button.clicked.connect(self.save_word)
+        self.save_button.clicked.connect(self.submit_word)
         self.cancel_button = QPushButton("Cancel Edit", objectName="softButton")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_edit)
@@ -486,9 +486,9 @@ class VocabApp(QMainWindow):
         actions.addWidget(self.hint_label)
         actions.addStretch(1)
 
-        self.ent_eng.returnPressed.connect(self.save_word)
-        self.ent_mm.returnPressed.connect(self.save_word)
-        self.ent_cn.returnPressed.connect(self.save_word)
+        self.ent_eng.returnPressed.connect(self.submit_word)
+        self.ent_mm.returnPressed.connect(self.submit_word)
+        self.ent_cn.returnPressed.connect(self.submit_word)
         self.ent_eng.installEventFilter(self)
         self.ent_eng.textChanged.connect(self._english_changed)
         self.ent_mm.textChanged.connect(self._mm_typed)
@@ -545,8 +545,10 @@ class VocabApp(QMainWindow):
         layout.addWidget(self.tree, 1)
 
         self.tree.itemDoubleClicked.connect(lambda *_: self.edit_word())
-        QShortcut(QKeySequence.Delete, self.tree, activated=self.delete_word)
-        QShortcut(QKeySequence("Return"), self.tree, activated=self.edit_word)
+        for key, slot in ((QKeySequence.Delete, self.delete_word),
+                          (QKeySequence("Return"), self.edit_word)):
+            shortcut = QShortcut(key, self.tree, activated=slot)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
 
         actions = QHBoxLayout()
         actions.setSpacing(8)
@@ -684,21 +686,45 @@ class VocabApp(QMainWindow):
         else:
             self.status_label.setText(f"No online result found for “{eng}” — add it manually")
 
-    def save_word(self):
+    def submit_word(self):
+        if self.editing_id is None:
+            self.save_word()
+        else:
+            self.update_word()
+
+    def _read_form(self):
         eng = normalize_myanmar_text(self.ent_eng.text())
         mm = normalize_myanmar_text(self.ent_mm.text())
         cn = normalize_myanmar_text(self.ent_cn.text())
         cat = self.normalize_category(self.combo_cat.currentText())
         if not eng or not mm:
             QMessageBox.warning(self, "Warning", "English and Myanmar text are required!")
+            (self.ent_eng if not eng else self.ent_mm).setFocus()
+            return None
+        return eng, cn, mm, cat
+
+    def save_word(self):
+        values = self._read_form()
+        if not values:
             return
-        conn = sqlite3.connect(DB_FILE)
-        conn.execute("INSERT INTO words (english, chinese, myanmar, category) VALUES (?,?,?,?)",
-                     (eng, cn, mm, cat))
-        conn.commit()
-        conn.close()
+        eng, cn, mm, cat = values
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            try:
+                word_id = conn.execute(
+                    "INSERT INTO words (english, chinese, myanmar, category) VALUES (?,?,?,?)",
+                    (eng, cn, mm, cat),
+                ).lastrowid
+                conn.commit()
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            QMessageBox.critical(self, "Save failed", f"Could not save the word:\n{exc}")
+            return
         self.clear_form()
+        self._clear_filter()
         self.load_words()
+        self._reveal_word(word_id)
         self.status_label.setText(f"Saved “{eng}” as {cat}")
         self.ent_eng.setFocus()
 
@@ -730,47 +756,57 @@ class VocabApp(QMainWindow):
         self.combo_cat.setCurrentText(self.normalize_category(values[3]))
         self.editing_id = word_id
         self.save_button.setText("Update")
-        try:
-            self.save_button.clicked.disconnect(self.save_word)
-        except RuntimeError:
-            pass
-        self.save_button.clicked.connect(self.update_word)
         self.cancel_button.setEnabled(True)
         self.ent_eng.setFocus()
         self.status_label.setText(f"Editing word #{word_id} — press Update to save")
 
     def update_word(self):
-        eng = normalize_myanmar_text(self.ent_eng.text())
-        mm = normalize_myanmar_text(self.ent_mm.text())
-        cn = normalize_myanmar_text(self.ent_cn.text())
-        cat = self.normalize_category(self.combo_cat.currentText())
-        if not eng or not mm:
-            QMessageBox.warning(self, "Warning", "English and Myanmar text are required!")
+        values = self._read_form()
+        if not values:
             return
-
-        conn = sqlite3.connect(DB_FILE)
-        conn.execute(
-            "UPDATE words SET english=?, chinese=?, myanmar=?, category=? WHERE id=?",
-            (eng, cn, mm, cat, self.editing_id),
-        )
-        conn.commit()
-        conn.close()
+        eng, cn, mm, cat = values
         word_id = self.editing_id
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            try:
+                conn.execute(
+                    "UPDATE words SET english=?, chinese=?, myanmar=?, category=? WHERE id=?",
+                    (eng, cn, mm, cat, word_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            QMessageBox.critical(self, "Save failed", f"Could not update the word:\n{exc}")
+            return
         self.cancel_edit()
+        self._clear_filter()
         self.load_words()
+        self._reveal_word(word_id)
         self.status_label.setText(f"Updated word #{word_id}")
+        self.ent_eng.setFocus()
 
     def cancel_edit(self):
         self.editing_id = None
-        try:
-            self.save_button.clicked.disconnect()
-        except RuntimeError:
-            pass
         self.save_button.setText("Save Word")
-        self.save_button.clicked.connect(self.save_word)
         self.cancel_button.setEnabled(False)
         self.combo_cat.setCurrentText(CATEGORIES[0])
         self.clear_form()
+
+    def _clear_filter(self):
+        if self.ent_search.text():
+            self.ent_search.blockSignals(True)
+            self.ent_search.clear()
+            self.ent_search.blockSignals(False)
+
+    def _reveal_word(self, word_id):
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            if item.text(0) == str(word_id):
+                self.tree.clearSelection()
+                item.setSelected(True)
+                self.tree.scrollToItem(item)
+                break
 
     def clear_form(self):
         self.ent_eng.clear()
