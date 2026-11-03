@@ -113,6 +113,117 @@ def normalize_myanmar_text(text):
     return unicodedata.normalize("NFC", text)
 
 
+_HANZI_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff\u3007]")
+
+_s2t_converter = None
+_s2t_failed = False
+
+_S2T_RUN_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff\u3007]+")
+
+
+def _simplified_to_traditional(text):
+    """Convert Simplified characters to Traditional; no-op with opencc missing.
+
+    Conversion is applied per hanzi run, and only when the run contains at
+    least one genuinely Simplified character. Runs that are already fully
+    Traditional are passed through untouched, which protects them from
+    OpenCC's phrase dictionary (it would otherwise rewrite e.g. 合家庭
+    to 閤家庭) and keeps the conversion idempotent."""
+    global _s2t_converter, _s2t_failed
+    if _s2t_failed or not text or not _HANZI_RE.search(text):
+        return text
+    if _s2t_converter is None:
+        try:
+            from opencc import OpenCC
+        except ImportError:
+            _s2t_failed = True
+            print("opencc is not installed — Chinese stays as typed "
+                  "(pip install opencc-python-reimplemented)")
+            return text
+        _s2t_converter = OpenCC("s2tw")
+    rebuilt = ""
+    position = 0
+    for match in _S2T_RUN_RE.finditer(text):
+        rebuilt += text[position:match.start()]
+        run = match.group(0)
+        if any(_s2t_converter.convert(ch) != ch for ch in run):
+            rebuilt += _s2t_converter.convert(run)
+        else:
+            rebuilt += run  # already Traditional — leave exactly as-is
+        position = match.end()
+    rebuilt += text[position:]
+    return rebuilt
+
+
+_pinyin_failed = False
+
+
+def _generate_pinyin(hanzi):
+    """Build tone-marked pinyin for a hanzi phrase; "" with pypinyin missing."""
+    global _pinyin_failed
+    if _pinyin_failed:
+        return ""
+    try:
+        from pypinyin import Style, lazy_pinyin
+    except ImportError:
+        _pinyin_failed = True
+        print("pypinyin is not installed — pinyin left empty "
+              "(pip install pypinyin)")
+        return ""
+    # Keep only letters, tone marks, "/", spaces and apostrophes in generated
+    # pinyin — no punctuation that could break re-detection on the next run.
+    raw = "".join(lazy_pinyin(hanzi, style=Style.TONE, errors=lambda chunk: chunk))
+    raw = raw.replace("／", "/")
+    return "".join(ch for ch in raw if ch in " '/" or unicodedata.category(ch) in ("Ll", "Lu", "Mn"))
+
+
+def _looks_like_pinyin(value):
+    """Heuristic: pinyin is latin letters with tone marks/separators, no hanzi."""
+    value = value.strip()
+    if not value or not re.search(r"[A-Za-z]", value):
+        return False
+    for ch in value:
+        if ch in " '/" or ch.isdigit() or unicodedata.category(ch) in ("Ll", "Lu", "Mn"):
+            continue
+        return False
+    return True
+
+
+def _normalize_single_chinese(text):
+    """One Chinese entry -> Traditional + optional (pinyin), keeping existing pinyin."""
+    if not text or not _HANZI_RE.search(text):
+        return text
+    pinyin = None
+    core = text
+    match = re.match(r"^(.*\S)\s*[（(]\s*([^（）()]*)[）)]\s*$", text)
+    if match:
+        candidate = match.group(2).strip()
+        if candidate and _looks_like_pinyin(candidate):
+            pinyin = candidate
+            core = match.group(1).strip()
+    traditional = _simplified_to_traditional(core)
+    if not pinyin:
+        pinyin = _generate_pinyin(traditional)
+    return "%s (%s)" % (traditional, pinyin) if pinyin else traditional
+
+
+def normalize_chinese_entry(text):
+    """Normalize a whole Chinese field: comma-separated entries are
+    handled individually, non-Chinese text is returned unchanged."""
+    text = (text or "").strip()
+    if not text or not _HANZI_RE.search(text):
+        return text
+    parts = re.split(r"([,，])", text)  # keep the separator tokens
+    out = []
+    for index, part in enumerate(parts):
+        if index % 2 or not part.strip():
+            out.append(part)
+            continue
+        strip = part.lstrip()
+        out.append(part[:len(part) - len(strip)] + _normalize_single_chinese(strip))
+    return "".join(out)
+
+
 def _http_get(url, timeout=10):
     scheme = urllib.parse.urlparse(url).scheme
     if scheme not in ("http", "https"):
@@ -240,6 +351,7 @@ def init_db():
     # Erase deleted content from disk instead of leaving it in free pages.
     cur.execute("PRAGMA secure_delete=ON")
     _migrate_myanmar_text(conn)
+    _migrate_chinese_text(conn)
     conn.commit()
     conn.close()
 
@@ -268,6 +380,35 @@ def _migrate_myanmar_text(conn):
     conn.execute("PRAGMA user_version=1")
     if updated:
         print("Normalized Myanmar text in %d row(s)" % updated)
+
+
+def _migrate_chinese_text(conn):
+    """Convert stored Chinese entries to Traditional characters with pinyin.
+    Simplified characters become Traditional, entries missing pinyin get it
+    added, and text that is already correct is left untouched. One-time,
+    guarded by user_version."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version >= 2:
+        return
+    rows = conn.execute(
+        "SELECT id, chinese FROM words WHERE chinese IS NOT NULL AND chinese != ''"
+    ).fetchall()
+    updated = 0
+    samples = []
+    for word_id, cn in rows:
+        fixed = normalize_chinese_entry(cn)
+        if fixed != (cn or ""):
+            conn.execute("UPDATE words SET chinese=? WHERE id=?", (fixed, word_id))
+            updated += 1
+            if len(samples) < 8:
+                samples.append((cn, fixed))
+    conn.execute("PRAGMA user_version=2")
+    if updated:
+        print("Converted Chinese to Traditional + pinyin in %d row(s)" % updated)
+        for old, new in samples:
+            print("  %r -> %r" % (old, new))
+    else:
+        print("Chinese entries already use Traditional + pinyin (checked %d)" % len(rows))
 
 
 STYLESHEET = """
@@ -837,7 +978,7 @@ class VocabApp(QMainWindow):
         elif self.mm_hint.text() == "Searching online…":
             self._set_hint(self.mm_hint, "Not found — add manually", COLORS["danger_text"])
         if cn and not self.ent_cn.text().strip():
-            self.ent_cn.setText(cn)
+            self.ent_cn.setText(normalize_chinese_entry(cn))
             self._set_hint(self.cn_hint, "Found online ✓", COLORS["accent_dark"])
             filled.append("Chinese")
         elif self.cn_hint.text() == "Searching online…":
@@ -856,7 +997,14 @@ class VocabApp(QMainWindow):
     def _read_form(self):
         eng = normalize_myanmar_text(self.ent_eng.text())
         mm = normalize_myanmar_text(self.ent_mm.text())
-        cn = normalize_myanmar_text(self.ent_cn.text())
+        cn_raw = normalize_myanmar_text(self.ent_cn.text())
+        cn = normalize_chinese_entry(cn_raw)
+        if cn_raw and cn != cn_raw:
+            # Show the converted text in the field (signals blocked so the hint survives).
+            self.ent_cn.blockSignals(True)
+            self.ent_cn.setText(cn)
+            self.ent_cn.blockSignals(False)
+            self._set_hint(self.cn_hint, "Auto-converted to Traditional + pinyin ✓", COLORS["accent_dark"])
         cat = self.normalize_category(self.combo_cat.currentText())
         if not eng or not mm:
             QMessageBox.warning(self, "Warning", "English and Myanmar text are required!")
@@ -895,7 +1043,7 @@ class VocabApp(QMainWindow):
         if not found:
             return
         word_id, _values = found
-        cn = normalize_myanmar_text(self.ent_cn.text())
+        cn = normalize_chinese_entry(normalize_myanmar_text(self.ent_cn.text()))
         if not cn:
             QMessageBox.warning(self, "Warning", "Type the Chinese definition first.")
             return
@@ -1027,8 +1175,18 @@ class VocabApp(QMainWindow):
             clauses.append("(LOWER(category) = LOWER(?))")
             params.append(category)
         if term:
-            clauses.append("(english LIKE ? OR myanmar LIKE ? OR chinese LIKE ? OR category LIKE ?)")
-            params.extend([q, q, q, q])
+            # The library stores Traditional Chinese, so always search for the
+            # Simplified spelling too — users type either script.
+            chinese_variants = [term]
+            converted = _simplified_to_traditional(term)
+            if converted != term:
+                chinese_variants.append(converted)
+            chinese_alts = " OR ".join(["chinese LIKE ?"] * len(chinese_variants))
+            clauses.append(
+                f"(english LIKE ? OR myanmar LIKE ? OR category LIKE ? OR {chinese_alts})"
+            )
+            params.extend([q, q, q])
+            params.extend(f"%{variant}%" for variant in chinese_variants)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         conn = sqlite3.connect(DB_FILE)
         rows = conn.execute(
