@@ -1,3 +1,5 @@
+import csv
+import datetime
 import html
 import json
 import os
@@ -9,10 +11,10 @@ import unicodedata
 import urllib.parse
 import urllib.request
 
-from PySide6.QtCore import Qt, QEvent, QObject, QTimer, Signal
-from PySide6.QtGui import QFont, QFontDatabase, QKeySequence, QShortcut
+from PySide6.QtCore import QMarginsF, QSizeF, Qt, QEvent, QObject, QTimer, Signal
+from PySide6.QtGui import QFont, QFontDatabase, QKeySequence, QPageLayout, QPageSize, QPdfWriter, QShortcut, QTextDocument
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
+    QApplication, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
@@ -392,6 +394,108 @@ QHeaderView::section:hover { background: %(soft_hover)s; }
 """ % COLORS
 
 
+EXPORT_HEADERS = ("ID", "English", "Chinese", "Category", "Myanmar")
+
+
+def export_csv(path, rows):
+    """Export rows as UTF-8 CSV; the BOM lets Excel open Myanmar/Chinese correctly."""
+    with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(EXPORT_HEADERS)
+        writer.writerows(rows)
+
+
+def export_markdown(path, rows):
+    """Export rows as a Markdown table."""
+    def md_cell(value):
+        return str(value or "").replace("|", "\\|").replace("\n", " ")
+    lines = [
+        "# VocApp Vocabulary Export",
+        "",
+        "| " + " | ".join(EXPORT_HEADERS) + " |",
+        "| " + " | ".join(["---"] * len(EXPORT_HEADERS)) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(md_cell(v) for v in row) + " |")
+    lines.append("")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines))
+
+
+def export_excel(path, rows):
+    """Export rows as a formatted Excel workbook (requires openpyxl)."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Vocabulary"
+    sheet.append(EXPORT_HEADERS)
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(fill_type="solid", start_color="13293D", end_color="13293D")
+    thin_side = Side(style="thin", color="D7E0E8")
+    cell_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+    for column, header in enumerate(EXPORT_HEADERS, start=1):
+        cell = sheet.cell(row=1, column=column)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = cell_border
+        cell.alignment = Alignment(vertical="center")
+    for row in rows:
+        sheet.append(tuple(str(value or "") for value in row))
+    for number, header in enumerate(EXPORT_HEADERS, start=1):
+        width = max(len(header) + 4, 12)
+        if header == "Myanmar" or header == "English":
+            width = 40
+        elif header == "Chinese":
+            width = 30
+        column_letter = sheet.cell(row=1, column=number).column_letter
+        sheet.column_dimensions[column_letter].width = width
+        for cell in sheet[chr(ord("A") + number - 1)][1:]:
+            cell.border = cell_border
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+    sheet.freeze_panes = "A2"
+    workbook.save(path)
+
+
+def export_pdf(path, rows):
+    """Export rows as a paginated PDF table using Qt's own PDF engine."""
+    import html as _html
+    head_cells = "".join("<th>%s</th>" % _html.escape(h) for h in EXPORT_HEADERS)
+    body_cells = "".join(
+        "<tr>%s</tr>" % "".join("<td>%s</td>" % _html.escape(str(v or "")) for v in row)
+        for row in rows
+    )
+    style = (
+        "table{width:100%;border-collapse:collapse;font-size:9pt;}"
+        "th{background:#13293d;color:#ffffff;padding:5px 6px;border:1px solid #13293d;}"
+        "td{border:1px solid #b9c9d8;padding:4px 6px;vertical-align:top;}"
+    )
+    captions = "<style>%s</style><h2>VocApp Vocabulary</h2><p>%d words &mdash; exported %s</p>" % (
+        style, len(rows), html.escape(datetime.date.today().isoformat()),
+    )
+    doc_html = captions + "<table><thead><tr>%s</tr></thead><tbody>%s</tbody></table>" % (
+        head_cells, body_cells,
+    )
+    writer = QPdfWriter(path)
+    writer.setResolution(150)
+    writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+    writer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout.Unit.Millimeter)
+    document = QTextDocument()
+    document.setDocumentMargin(0)
+    document.setHtml(doc_html)
+    document.setPageSize(QSizeF(writer.width(), writer.height()))
+    document.print_(writer)
+
+
+EXPORT_FORMATS = {
+    ".csv": (export_csv, "CSV files (*.csv)"),
+    ".xlsx": (export_excel, "Excel workbooks (*.xlsx)"),
+    ".md": (export_markdown, "Markdown files (*.md)"),
+    ".pdf": (export_pdf, "PDF files (*.pdf)"),
+}
+EXPORT_FILTER = ";;".join(filter_label for _fn, filter_label in EXPORT_FORMATS.values())
+
+
 class _LookupSignals(QObject):
     finished = Signal(str, object, object)
 
@@ -555,6 +659,9 @@ class VocabApp(QMainWindow):
         refresh_btn = QPushButton("Refresh", objectName="softButton")
         refresh_btn.clicked.connect(self.load_words)
         toolbar.addWidget(refresh_btn)
+        export_btn = QPushButton("Export…", objectName="softButton")
+        export_btn.clicked.connect(self.export_words)
+        toolbar.addWidget(export_btn)
         layout.addLayout(toolbar)
 
         self.tree = QTreeWidget()
@@ -901,7 +1008,8 @@ class VocabApp(QMainWindow):
         self.load_words()
         self.status_label.setText(f"Deleted {len(ids)} word(s)")
 
-    def load_words(self, *_args):
+    def _current_rows(self):
+        """Run the query matching the current filter, search and sort state."""
         term = normalize_myanmar_text(self.ent_search.text())
         q = f"%{term}%"
         category = self.current_category_filter()
@@ -924,10 +1032,16 @@ class VocabApp(QMainWindow):
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         conn = sqlite3.connect(DB_FILE)
         rows = conn.execute(
-            f"SELECT * FROM words {where} ORDER BY {sql_order}",
+            f"SELECT {', '.join(self.tree_columns)} FROM words {where} ORDER BY {sql_order}",
             params,
         ).fetchall()
         conn.close()
+        return rows
+
+    def load_words(self, *_args):
+        rows = self._current_rows()
+        term = normalize_myanmar_text(self.ent_search.text())
+        category = self.current_category_filter()
 
         self.tree.clear()
         for row in rows:
@@ -965,6 +1079,38 @@ class VocabApp(QMainWindow):
         total = conn.execute("SELECT COUNT(*) FROM words").fetchone()[0]
         conn.close()
         return total
+
+    def export_words(self):
+        rows = self._current_rows()
+        if not rows:
+            QMessageBox.information(
+                self, "Export", "There are no words to export with the current filter."
+            )
+            return
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, "Export Vocabulary", "vocabulary.csv", EXPORT_FILTER
+        )
+        if not path:
+            return
+        extension = os.path.splitext(path)[1].lower()
+        if extension not in EXPORT_FORMATS:
+            # Fall back to the format the user picked in the file-type dropdown.
+            for extension, (_exporter, filter_label) in EXPORT_FORMATS.items():
+                if filter_label == selected_filter:
+                    break
+            path += extension
+        if extension not in EXPORT_FORMATS:
+            QMessageBox.warning(self, "Export failed", "Unsupported file type: %s" % extension)
+            return
+        exporter, _filter_label = EXPORT_FORMATS[extension]
+        try:
+            exporter(path, rows)
+        except Exception as exc:
+            QMessageBox.critical(self, "Export failed", "Could not write %s:\n%s" % (path, exc))
+            return
+        word_count = len(rows)
+        format_name = extension.lstrip(".").upper()
+        self.status_label.setText(f"Exported {word_count} word(s) to {format_name} — {path}")
 
     def open_quiz(self):
         quiz = QDialog(self)
