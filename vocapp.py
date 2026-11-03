@@ -112,6 +112,9 @@ def normalize_myanmar_text(text):
 
 
 def _http_get(url, timeout=10):
+    scheme = urllib.parse.urlparse(url).scheme
+    if scheme not in ("http", "https"):
+        raise ValueError("Only http/https URLs are allowed")
     req = urllib.request.Request(url, headers=HTTP_HEADERS)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8", "replace")
@@ -212,6 +215,7 @@ def lookup_chinese(term):
 
 
 def init_db():
+    _harden_db_permissions()
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("""
@@ -228,14 +232,30 @@ def init_db():
         cur.execute("ALTER TABLE words ADD COLUMN category TEXT DEFAULT 'TOEIC'")
         cur.execute("UPDATE words SET category='TOEIC' WHERE category IS NULL OR category=''")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_words_english ON words (english)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_words_category ON words (category)")
+    # Speed up writes/reads and keep the database recoverable on crashes.
+    cur.execute("PRAGMA journal_mode=WAL")
+    # Erase deleted content from disk instead of leaving it in free pages.
+    cur.execute("PRAGMA secure_delete=ON")
     _migrate_myanmar_text(conn)
     conn.commit()
     conn.close()
 
 
+def _harden_db_permissions():
+    """Restrict the database file to the current user only."""
+    try:
+        os.chmod(DB_FILE, 0o600)
+    except OSError:
+        pass  # e.g. permissions not supported on this filesystem
+
+
 def _migrate_myanmar_text(conn):
     """Normalize stored Myanmar text to clean NFC Unicode so it renders
-    correctly with Noto Sans Myanmar."""
+    correctly with Noto Sans Myanmar. Runs once (guarded by user_version)."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version >= 1:
+        return
     rows = conn.execute("SELECT id, myanmar FROM words").fetchall()
     updated = 0
     for word_id, mm in rows:
@@ -243,6 +263,7 @@ def _migrate_myanmar_text(conn):
         if fixed != (mm or ""):
             conn.execute("UPDATE words SET myanmar=? WHERE id=?", (fixed, word_id))
             updated += 1
+    conn.execute("PRAGMA user_version=1")
     if updated:
         print("Normalized Myanmar text in %d row(s)" % updated)
 
@@ -383,6 +404,7 @@ class VocabApp(QMainWindow):
         self.editing_id = None
         self.sort_col = 0
         self.sort_desc = True
+        self.known_categories = list(CATEGORIES)
         self._lookup_inflight = set()
         self.lookup_signals = _LookupSignals()
         self.lookup_signals.finished.connect(self._apply_lookup)
@@ -416,6 +438,7 @@ class VocabApp(QMainWindow):
         QShortcut(QKeySequence("Escape"), self, activated=self.escape_search)
 
         self.reset_search(refresh=False)
+        self._refresh_filter_options()
         self.load_words()
 
     def _build_header(self):
@@ -511,11 +534,19 @@ class VocabApp(QMainWindow):
         toolbar.setSpacing(8)
         toolbar.addWidget(QLabel("Your vocabulary", objectName="cardTitle"))
         toolbar.addStretch(1)
+        filter_label = QLabel("Filter", objectName="mutedLabel")
+        toolbar.addWidget(filter_label)
+        self.filter_box = QComboBox()
+        self.filter_box.addItem("All categories", None)
+        for cat in CATEGORIES:
+            self.filter_box.addItem(cat, cat)
+        self.filter_box.currentIndexChanged.connect(self.load_words)
+        toolbar.addWidget(self.filter_box)
         search_label = QLabel("Search", objectName="mutedLabel")
         toolbar.addWidget(search_label)
         self.ent_search = QLineEdit()
         self.ent_search.setPlaceholderText(SEARCH_PLACEHOLDER)
-        self.ent_search.setFixedWidth(320)
+        self.ent_search.setFixedWidth(280)
         self.ent_search.textChanged.connect(self.load_words)
         toolbar.addWidget(self.ent_search)
         clear_btn = QPushButton("Clear", objectName="softButton")
@@ -589,9 +620,15 @@ class VocabApp(QMainWindow):
             self.setFocus()
 
     def reset_search(self, refresh=True):
+        self.filter_box.blockSignals(True)
+        self.filter_box.setCurrentIndex(0)
+        self.filter_box.blockSignals(False)
         self.ent_search.clear()
         if refresh:
             self.load_words()
+
+    def current_category_filter(self):
+        return self.filter_box.currentData()
 
     def on_sort_indicator(self, col, order):
         self.sort_col = col
@@ -612,11 +649,28 @@ class VocabApp(QMainWindow):
         return word_id, texts
 
     def normalize_category(self, value):
-        value = (value or "").strip().lower()
-        for cat in CATEGORIES:
-            if value == cat.lower():
+        value = (value or "").strip()
+        for cat in self.known_categories:
+            if value.lower() == cat.lower():
                 return cat
         return CATEGORIES[0]
+
+    def _refresh_filter_options(self):
+        """Add any category found in the database to the filter and editor combos."""
+        conn = sqlite3.connect(DB_FILE)
+        cats = [row[0] for row in conn.execute(
+            "SELECT DISTINCT category FROM words "
+            "WHERE category IS NOT NULL AND category != '' "
+            "ORDER BY LOWER(category)"
+        ).fetchall()]
+        conn.close()
+        for cat in cats:
+            if cat not in self.known_categories:
+                self.known_categories.append(cat)
+                if self.combo_cat.findText(cat) == -1:
+                    self.combo_cat.addItem(cat)
+                if self.filter_box.findText(cat) == -1:
+                    self.filter_box.addItem(cat, cat)
 
     def _set_hint(self, label, text, color):
         label.setText(text)
@@ -723,6 +777,7 @@ class VocabApp(QMainWindow):
             return
         self.clear_form()
         self._clear_filter()
+        self._refresh_filter_options()
         self.load_words()
         self._reveal_word(word_id)
         self.status_label.setText(f"Saved “{eng}” as {cat}")
@@ -781,6 +836,7 @@ class VocabApp(QMainWindow):
             return
         self.cancel_edit()
         self._clear_filter()
+        self._refresh_filter_options()
         self.load_words()
         self._reveal_word(word_id)
         self.status_label.setText(f"Updated word #{word_id}")
@@ -798,6 +854,10 @@ class VocabApp(QMainWindow):
             self.ent_search.blockSignals(True)
             self.ent_search.clear()
             self.ent_search.blockSignals(False)
+        if self.filter_box.currentIndex() != 0:
+            self.filter_box.blockSignals(True)
+            self.filter_box.setCurrentIndex(0)
+            self.filter_box.blockSignals(False)
 
     def _reveal_word(self, word_id):
         for i in range(self.tree.topLevelItemCount()):
@@ -837,23 +897,35 @@ class VocabApp(QMainWindow):
             conn.execute("DELETE FROM words WHERE id=?", (word_id,))
         conn.commit()
         conn.close()
+        self._refresh_filter_options()
         self.load_words()
         self.status_label.setText(f"Deleted {len(ids)} word(s)")
 
     def load_words(self, *_args):
         term = normalize_myanmar_text(self.ent_search.text())
         q = f"%{term}%"
+        category = self.current_category_filter()
         order = "DESC" if self.sort_desc else "ASC"
+        if not 0 <= self.sort_col < len(self.tree_columns):
+            self.sort_col = 0
         col = self.tree_columns[self.sort_col]
         if col == "id":
             sql_order = f"words.id {order}"
         else:
             sql_order = f"{col} COLLATE NOCASE {order}, words.id DESC"
+        clauses = []
+        params = []
+        if category:
+            clauses.append("(LOWER(category) = LOWER(?))")
+            params.append(category)
+        if term:
+            clauses.append("(english LIKE ? OR myanmar LIKE ? OR chinese LIKE ? OR category LIKE ?)")
+            params.extend([q, q, q, q])
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         conn = sqlite3.connect(DB_FILE)
         rows = conn.execute(
-            "SELECT * FROM words WHERE english LIKE ? OR myanmar LIKE ? OR chinese LIKE ? OR category LIKE ? "
-            f"ORDER BY {sql_order}",
-            (q, q, q, q),
+            f"SELECT * FROM words {where} ORDER BY {sql_order}",
+            params,
         ).fetchall()
         conn.close()
 
@@ -867,6 +939,8 @@ class VocabApp(QMainWindow):
         if len(rows) == 0:
             if term:
                 message = "No words match \u201c%s\u201d — try another search" % term
+            elif category:
+                message = "No %s words yet — add one above" % category
             else:
                 message = "Your library is empty — add your first word above"
             item = QTreeWidgetItem(("", message, "", "", ""))
@@ -879,7 +953,12 @@ class VocabApp(QMainWindow):
         )
         total = self._total_count()
         self.word_count_label.setText(f"{total} words")
-        self.status_label.setText(f"{len(rows)} shown" + (f" • filter: \u201c{term}\u201d" if term else ""))
+        parts = []
+        if category:
+            parts.append(f"category: {category}")
+        if term:
+            parts.append(f"filter: \u201c{term}\u201d")
+        self.status_label.setText(f"{len(rows)} shown" + (" • " + " • ".join(parts) if parts else ""))
 
     def _total_count(self):
         conn = sqlite3.connect(DB_FILE)

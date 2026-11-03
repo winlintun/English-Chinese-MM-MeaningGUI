@@ -1,5 +1,8 @@
 note.md
 *.db
+*.db-wal
+*.db-shm
+.env/
 *.spec
 build
 dist
