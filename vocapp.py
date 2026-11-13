@@ -666,7 +666,7 @@ class VocabApp(QMainWindow):
         super().__init__()
         self.editing_id = None
         self.sort_col = 0
-        self.sort_desc = True
+        self.sort_desc = False
         self.known_categories = list(CATEGORIES)
         self._lookup_inflight = set()
         self.lookup_signals = _LookupSignals()
@@ -834,7 +834,7 @@ class VocabApp(QMainWindow):
         header = self.tree.header()
         header.setStretchLastSection(True)
         header.sortIndicatorChanged.connect(self.on_sort_indicator)
-        header.setSortIndicator(0, Qt.SortOrder.DescendingOrder)
+        header.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
         header.setSectionsMovable(False)
         for i, width in enumerate((48, 240, 200, 110, 270)):
             self.tree.setColumnWidth(i, width)
@@ -901,15 +901,23 @@ class VocabApp(QMainWindow):
         self.sort_desc = order == Qt.SortOrder.DescendingOrder
         self.load_words()
 
+    def _item_word_id(self, item):
+        """Return the real database id stored on a tree item (or None)."""
+        word_id = item.data(0, Qt.ItemDataRole.UserRole)
+        if word_id is None:
+            try:
+                word_id = int(item.text(0))
+            except ValueError:
+                return None
+        return word_id
+
     def selected_word(self):
         items = self.tree.selectedItems()
         if not items:
             QMessageBox.information(self, "Info", "Please select a word in the table first.")
             return None
-        values = items[0].text(0)
-        try:
-            word_id = int(values)
-        except ValueError:
+        word_id = self._item_word_id(items[0])
+        if word_id is None:
             return None
         texts = [items[0].text(i) for i in range(5)]
         return word_id, texts
@@ -1135,7 +1143,7 @@ class VocabApp(QMainWindow):
     def _reveal_word(self, word_id):
         for i in range(self.tree.topLevelItemCount()):
             item = self.tree.topLevelItem(i)
-            if item.text(0) == str(word_id):
+            if self._item_word_id(item) == word_id:
                 self.tree.clearSelection()
                 item.setSelected(True)
                 self.tree.scrollToItem(item)
@@ -1155,10 +1163,10 @@ class VocabApp(QMainWindow):
             return
         ids = []
         for item in items:
-            try:
-                ids.append(int(item.text(0)))
-            except ValueError:
+            word_id = self._item_word_id(item)
+            if word_id is None:
                 return
+            ids.append(word_id)
         answer = QMessageBox.question(
             self, "Confirm", f"Delete {len(ids)} selected word(s)?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -1228,10 +1236,17 @@ class VocabApp(QMainWindow):
         category = self.current_category_filter()
 
         self.tree.clear()
-        for row in rows:
-            word_id, english, chinese, myanmar = row[0], row[1], row[2], row[3]
-            category = row[4] if len(row) > 4 and row[4] else CATEGORIES[0]
-            item = QTreeWidgetItem((str(word_id), english or "", chinese or "", category, myanmar or ""))
+        for row_number, row in enumerate(rows, start=1):
+            # Query order is (id, english, chinese, category, myanmar).
+            word_id, english, chinese, category, myanmar = (
+                row[0], row[1], row[2],
+                row[3] if len(row) > 4 and row[3] else CATEGORIES[0],
+                row[4] if len(row) > 4 else "",
+            )
+            # Show a sequential number 1..N for the current view; keep the
+            # real database id in the item's UserRole data for edit/delete.
+            item = QTreeWidgetItem((str(row_number), english or "", chinese or "", category, myanmar or ""))
+            item.setData(0, Qt.ItemDataRole.UserRole, word_id)
             self.tree.addTopLevelItem(item)
 
         if len(rows) == 0:
@@ -1299,8 +1314,8 @@ class VocabApp(QMainWindow):
     def open_quiz(self):
         quiz = QDialog(self)
         quiz.setWindowTitle("VocApp | Quick Quiz")
-        quiz.resize(900, 520)
-        quiz.setMinimumSize(780, 420)
+        quiz.resize(1040, 680)
+        quiz.setMinimumSize(860, 520)
 
         layout = QVBoxLayout(quiz)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1313,7 +1328,7 @@ class VocabApp(QMainWindow):
         title = QLabel("Quick Quiz", objectName="titleLabel")
         title.setStyleSheet("font-size: 16pt;")
         header_layout.addWidget(title)
-        header_layout.addWidget(QLabel("A fresh set of 10 words from your library",
+        header_layout.addWidget(QLabel("A random set of 10 words from your library",
                                        objectName="subtitleLabel"))
         layout.addWidget(header)
 
@@ -1323,16 +1338,39 @@ class VocabApp(QMainWindow):
         body_layout.setSpacing(12)
 
         quiz_tree = QTreeWidget()
-        cols = ("number", "english", "category", "myanmar", "chinese")
-        quiz_tree.setColumnCount(5)
-        quiz_tree.setHeaderLabels([c.capitalize() for c in cols])
+        quiz_tree.setObjectName("quizTree")
+        cols = ("#", "English", "Category", "Myanmar", "Chinese")
+        quiz_tree.setColumnCount(len(cols))
+        quiz_tree.setHeaderLabels(cols)
         quiz_tree.setRootIsDecorated(False)
         quiz_tree.setAlternatingRowColors(True)
         quiz_tree.setSortingEnabled(False)
-        quiz_tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        # Taller rows so Myanmar script and Chinese text stay readable.
+        quiz_tree.setStyleSheet("QTreeWidget::item { height: 42px; }")
+        header_view = quiz_tree.header()
+        header_view.setStretchLastSection(True)
+        header_view.setSectionsMovable(False)
+        header_view.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        for column, (width, mode) in enumerate((
+                (44, QHeaderView.ResizeMode.Fixed),
+                (200, QHeaderView.ResizeMode.Stretch),
+                (170, QHeaderView.ResizeMode.Fixed),
+                (300, QHeaderView.ResizeMode.Fixed),
+                (260, QHeaderView.ResizeMode.Fixed))):
+            header_view.setSectionResizeMode(column, mode)
+            quiz_tree.setColumnWidth(column, width)
         body_layout.addWidget(quiz_tree, 1)
 
-        refresh_btn = QPushButton("Refresh Items", objectName="accentButton")
+        quiz_status = QLabel("", objectName="hintLabel")
+        quiz_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        body_layout.addWidget(quiz_status)
+
+        refresh_btn = QPushButton("Refresh Items  (F5)", objectName="accentButton")
+        refresh_btn.setMinimumWidth(220)
+        refresh_shortcut = QShortcut(QKeySequence("F5"), quiz)
+        refresh_shortcut.activated.connect(lambda: refresh_btn.click())
+
+        base_font = QApplication.font()
 
         def refresh_quiz():
             quiz_tree.clear()
@@ -1340,6 +1378,7 @@ class VocabApp(QMainWindow):
             rows = conn.execute(
                 "SELECT english, category, myanmar, chinese FROM words ORDER BY RANDOM() LIMIT 10"
             ).fetchall()
+            total = conn.execute("SELECT COUNT(*) FROM words").fetchone()[0]
             conn.close()
             if not rows:
                 rows = [("Add words first…", "—", "", "")]
@@ -1347,8 +1386,19 @@ class VocabApp(QMainWindow):
                 row = list(row)
                 if not row[1]:
                     row[1] = CATEGORIES[0]
-                quiz_tree.addTopLevelItem(
-                    QTreeWidgetItem((str(number),) + tuple(str(x or "") for x in row)))
+                item = QTreeWidgetItem(
+                    (str(number),) + tuple(str(x or "") for x in row))
+                # Centre the number column and size Myanmar/Chinese text up.
+                item.setTextAlignment(0, Qt.AlignmentFlag.AlignCenter)
+                item.setFont(0, QFont(base_font.family(), 11, QFont.Weight.Bold))
+                item.setFont(3, QFont(base_font.family(), 12))
+                item.setFont(4, QFont(base_font.family(), 12))
+                quiz_tree.addTopLevelItem(item)
+            if total:
+                quiz_status.setText(
+                    f"Showing {len(rows)} random words of {total} — press F5 or Refresh for a new set")
+            else:
+                quiz_status.setText("Your library is empty — add words first")
 
         refresh_btn.clicked.connect(refresh_quiz)
         body_layout.addWidget(refresh_btn, 0, Qt.AlignmentFlag.AlignHCenter)
