@@ -8,3 +8,4 @@ dist
 env
 __pycache__
 vocabulary_backup.db
+vocabulary_backup.db.sha256

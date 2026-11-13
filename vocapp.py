@@ -1,5 +1,6 @@
 import csv
 import datetime
+import hashlib
 import html
 import json
 import os
@@ -362,6 +363,7 @@ def init_db():
     _migrate_chinese_text(conn)
     conn.commit()
     conn.close()
+    backup_database_if_changed()
 
 
 def _harden_db_permissions():
@@ -370,6 +372,53 @@ def _harden_db_permissions():
         os.chmod(DB_FILE, 0o600)
     except OSError:
         pass  # e.g. permissions not supported on this filesystem
+
+
+BACKUP_FILE = DB_FILE.replace(".db", "") + "_backup.db"
+BACKUP_HASH_FILE = BACKUP_FILE + ".sha256"
+
+
+def _db_data_fingerprint(conn):
+    """SHA-256 over the whole words table (ordered by id) plus schema version.
+
+    Only the content matters, so touching the file without changing data
+    (indexes, WAL, metadata) does not count as a change."""
+    hasher = hashlib.sha256()
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    hasher.update(("user_version=%d" % version).encode("utf-8"))
+    for row in conn.execute(
+        "SELECT id, english, chinese, myanmar, category FROM words ORDER BY id"
+    ):
+        hasher.update(repr(row).encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def backup_database_if_changed():
+    """On startup: refresh vocabulary_backup.db only when the data changed.
+
+    Compares a fingerprint of the words table with the one recorded at the
+    last backup. If nothing changed, the backup is left untouched."""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        fingerprint = _db_data_fingerprint(conn)
+        if os.path.exists(BACKUP_HASH_FILE):
+            with open(BACKUP_HASH_FILE, "r", encoding="utf-8") as handle:
+                stored = handle.read().strip()
+            if stored == fingerprint:
+                conn.close()
+                print("Database unchanged — backup is up to date")
+                return False
+        # SQLite's backup API copies a consistent snapshot (WAL-safe).
+        with sqlite3.connect(BACKUP_FILE) as destination:
+            conn.backup(destination)
+        with open(BACKUP_HASH_FILE, "w", encoding="utf-8") as handle:
+            handle.write(fingerprint)
+        conn.close()
+        print("Database changed — backup updated")
+        return True
+    except Exception as exc:
+        print("Backup skipped (%s)" % exc)
+        return False
 
 
 def _migrate_myanmar_text(conn):
