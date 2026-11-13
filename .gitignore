@@ -7,3 +7,4 @@ build
 dist
 env
 __pycache__
+vocabulary_backup.db
