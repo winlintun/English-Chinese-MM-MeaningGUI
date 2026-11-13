@@ -26,6 +26,8 @@ import re
 import sqlite3
 import sys
 
+import vocapp  # reuse the GUI's Chinese normalizer (Traditional + pinyin)
+
 # ===== Change these defaults if you want =====
 MD_FOLDER = "data/tocei"
 DB_FILE = "vocabulary.db"
@@ -65,6 +67,8 @@ def parse_md_file(path):
             myanmar = parts[1].strip()
             chinese = ",".join(parts[2:]).strip() if len(parts) > 2 else ""
             if english and myanmar:
+                # Convert to Traditional Chinese with pinyin on import.
+                chinese = vocapp.normalize_chinese_entry(chinese) if chinese else ""
                 rows.append((english, myanmar, chinese))
     return category, rows
 
