@@ -1,6 +1,6 @@
 # VocApp
 
-VocApp is a small desktop vocabulary manager built with Python and Tkinter. It is designed for English, Chinese, and Myanmar vocabulary and stores words in a local SQLite database.
+VocApp is a small desktop vocabulary manager built with Python and PySide6 (Qt). It is designed for English, Chinese, and Myanmar vocabulary and stores words in a local SQLite database.
 
 ## Features
 
@@ -14,12 +14,11 @@ VocApp is a small desktop vocabulary manager built with Python and Tkinter. It i
 
 ## Requirements
 
-- Windows
+- Windows or Linux with a desktop session
 - Python 3.10 or newer
-- Tkinter, normally included with the standard Python Windows installer
-- Packages listed in `requirements.txt` for the project environment
+- Packages listed in `requirements.txt` (`PySide6`, plus optional `opencc`, `pypinyin`, `openpyxl`)
 
-The application itself uses Python standard-library modules including `tkinter`, `sqlite3`, `os`, and `unicodedata`.
+The database, exports and font handling use the Python standard library (`sqlite3`, `os`, `unicodedata`).
 
 ## Installation
 
@@ -62,17 +61,11 @@ On first launch, the application creates the `words` table in the SQLite databas
 
 ## Database Location
 
-The current application is configured to use:
-
-```text
-C:\Users\%username%\Desktop\VocApp\vocabulary.db
-```
-
-To use the project from another folder or computer, update the `DB_FILE` value near the top of `vocapp.py` before running it. The database file is ignored by Git and is created automatically when the application starts.
+`vocabulary.db` lives next to `vocapp.py` (or next to the executable in a PyInstaller build). It is created automatically on first start, so there is nothing to configure. The file is not ignored by Git, because it holds your own vocabulary — do not commit it if you publish the project.
 
 ## Myanmar Fonts
 
-VocApp first checks for an installed Myanmar-compatible font. If one is not available, it searches the local `fonts` directory for a `.ttf` file. Keep the `fonts` directory beside `vocapp.py` when distributing the source application.
+VocApp first checks for an installed Myanmar-compatible font. If one is not available, it registers a bundled `.ttf` from the `fonts/` folder (the static Noto Sans Myanmar Regular; variable fonts are skipped). Keep `fonts/` beside `vocapp.py`, and ship it inside PyInstaller builds (`--add-data "fonts;fonts"`) so PDF export can use it too.
 
 ## Build a Windows Executable
 
@@ -89,12 +82,12 @@ Build using the included spec file:
 pyinstaller VocabApp.spec
 ```
 
-The executable is created in the `dist` directory. Keep the required font files available beside the executable if Myanmar text rendering needs the bundled font fallback.
+The executable is created in the `dist` directory. Build with `--add-data "fonts;fonts"` (or `datas = [("fonts", "fonts")]` in the spec) so the Myanmar fallback font is bundled; `vocapp.py` reads it from `sys._MEIPASS` and keeps `vocabulary.db` beside the executable.
 
 ## Project Files
 
 ```text
-vocapp.py          Main Tkinter application
+vocapp.py          Main PySide6 application
 VocabApp.spec      PyInstaller build configuration
 requirements.txt   Python package requirements
 fonts/             Optional Myanmar font files
@@ -103,5 +96,5 @@ vocabulary.db      Local database created at runtime
 
 ## Notes
 
-- The app currently uses a fixed database path in `vocapp.py`.
-- `build/`, `dist/`, `env/`, generated databases, and Python cache files are ignored by Git.
+- The database path follows the application folder; `DB_FILE` can be reassigned before `init_db()` when embedding or testing.
+- `build/`, `dist/`, `env/`, `.env/` and Python cache files are ignored by Git.

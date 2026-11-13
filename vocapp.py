@@ -19,8 +19,14 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vocabulary.db")
-FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+# In a PyInstaller onefile build, bundled data (fonts) lives in the temp
+# _MEIPASS folder, but the database must stay next to the executable so it
+# survives restarts.
+BUNDLE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+FONT_DIR = os.path.join(BUNDLE_DIR, "fonts")
+DB_FILE = os.path.join(os.path.dirname(os.path.abspath(sys.executable
+                                                      if getattr(sys, "frozen", False)
+                                                      else __file__)), "vocabulary.db")
 SEARCH_PLACEHOLDER = "Search words…"
 CATEGORIES = ("TOEIC", "TextBook")
 
@@ -68,22 +74,24 @@ def _find_local_noto_font():
     """Return path to a bundled Noto Sans Myanmar Regular .ttf, searching recursively."""
     if not os.path.isdir(FONT_DIR):
         return None
-    for dirpath, _dirnames, filenames in os.walk(FONT_DIR):
-        for filename in sorted(filenames):
-            lower = filename.lower()
-            if lower.endswith(".ttf") and "noto" in lower and (
-                ("sans" in lower and "regular" in lower) or "normal" in lower
-            ):
-                return os.path.join(dirpath, filename)
-    for dirpath, _dirnames, filenames in os.walk(FONT_DIR):
-        for filename in sorted(filenames):
-            lower = filename.lower()
-            if lower.endswith(".ttf") and ("regular" in lower or "normal" in lower):
-                return os.path.join(dirpath, filename)
-    for dirpath, _dirnames, filenames in os.walk(FONT_DIR):
-        for filename in sorted(filenames):
-            if filename.lower().endswith(".ttf"):
-                return os.path.join(dirpath, filename)
+
+    def static_ttfs():
+        for dirpath, _dirnames, filenames in os.walk(FONT_DIR):
+            for filename in sorted(filenames):
+                lower = filename.lower()
+                # variable fonts register under odd weights in some Qt
+                # versions; the static Regular is the safe target
+                if lower.endswith(".ttf") and "variablefont" not in lower:
+                    yield os.path.join(dirpath, filename), lower
+
+    for path, lower in static_ttfs():
+        if "noto" in lower and (("sans" in lower and "regular" in lower) or "normal" in lower):
+            return path
+    for path, lower in static_ttfs():
+        if "regular" in lower or "normal" in lower:
+            return path
+    for path, _lower in static_ttfs():
+        return path
     return None
 
 
@@ -601,13 +609,20 @@ def export_excel(path, rows):
 def export_pdf(path, rows):
     """Export rows as a paginated PDF table using Qt's own PDF engine."""
     import html as _html
+    font_family = resolve_myanmar_font_family()
     head_cells = "".join("<th>%s</th>" % _html.escape(h) for h in EXPORT_HEADERS)
     body_cells = "".join(
-        "<tr>%s</tr>" % "".join("<td>%s</td>" % _html.escape(str(v or "")) for v in row)
+        "<tr>%s</tr>" % "".join(
+            "<td>%s</td>" % ("<br />".join(_html.escape(line) for line in str(v or "").splitlines()) or "&nbsp;")
+            for v in row)
         for row in rows
     )
     style = (
-        "table{width:100%;border-collapse:collapse;font-size:9pt;}"
+        "body{font-family:'%s';}" % font_family.replace("'", "")
+        + "table{width:100%;border-collapse:collapse;font-size:9pt;}"
+        # Qt sizes a fixed column from the widest cell on every page; the
+        # ID column is narrow, so pin it instead of letting row "1000" push it
+        "th:first-child,td:first-child{width:6%;white-space:nowrap;}"
         "th{background:#13293d;color:#ffffff;padding:5px 6px;border:1px solid #13293d;}"
         "td{border:1px solid #b9c9d8;padding:4px 6px;vertical-align:top;}"
     )
@@ -622,6 +637,9 @@ def export_pdf(path, rows):
     writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
     writer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout.Unit.Millimeter)
     document = QTextDocument()
+    # the document's own default font decides fallbacks for glyphs the CSS
+    # family lacks, so it must be the Myanmar-capable one, not Qt's default
+    document.setDefaultFont(QFont(font_family, 10))
     document.setDocumentMargin(0)
     document.setHtml(doc_html)
     document.setPageSize(QSizeF(writer.width(), writer.height()))
@@ -1159,7 +1177,14 @@ class VocabApp(QMainWindow):
     def _current_rows(self):
         """Run the query matching the current filter, search and sort state."""
         term = normalize_myanmar_text(self.ent_search.text())
-        q = f"%{term}%"
+
+        def like_pattern(value):
+            # % and _ are LIKE wildcards; a literal % in a word must not
+            # match everything (and a bare % must not match nothing)
+            escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            return f"%{escaped}%"
+
+        q = like_pattern(term)
         category = self.current_category_filter()
         order = "DESC" if self.sort_desc else "ASC"
         if not 0 <= self.sort_col < len(self.tree_columns):
@@ -1181,12 +1206,13 @@ class VocabApp(QMainWindow):
             converted = _simplified_to_traditional(term)
             if converted != term:
                 chinese_variants.append(converted)
-            chinese_alts = " OR ".join(["chinese LIKE ?"] * len(chinese_variants))
+            chinese_alts = " OR ".join(["chinese LIKE ? ESCAPE '\\'"] * len(chinese_variants))
             clauses.append(
-                f"(english LIKE ? OR myanmar LIKE ? OR category LIKE ? OR {chinese_alts})"
+                "(english LIKE ? ESCAPE '\\' OR myanmar LIKE ? ESCAPE '\\' "
+                "OR category LIKE ? ESCAPE '\\' OR %s)" % chinese_alts
             )
             params.extend([q, q, q])
-            params.extend(f"%{variant}%" for variant in chinese_variants)
+            params.extend(like_pattern(variant) for variant in chinese_variants)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         conn = sqlite3.connect(DB_FILE)
         rows = conn.execute(
@@ -1333,11 +1359,56 @@ class VocabApp(QMainWindow):
         quiz.exec()
 
 
+# First family in the chain wins for each text run, so Latin letters are
+# always drawn from a real English font instead of the Myanmar font's
+# built-in (often mismatched) Latin glyphs, e.g. "ကျွန်မ Padauk ပါ။".
+LATIN_FONT_CANDIDATES = (
+    "Segoe UI",
+    "Roboto",
+    "Noto Sans",
+    "Arial",
+    "Helvetica",
+)
+
+# Last in the chain: covers Chinese runs that neither the Latin nor the
+# Myanmar font provides.
+CJK_FONT_CANDIDATES = (
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "PingFang SC",
+    "Noto Sans CJK SC",
+    "SimSun",
+)
+
+
+def build_ui_font(myanmar_family):
+    """Application font with a Latin -> Myanmar -> CJK fallback chain.
+
+    Every run of text is rendered with the first family in the chain that
+    provides its glyphs, so mixed English/Myanmar strings keep a uniform
+    look instead of showing the Myanmar font's own Latin alphabet."""
+    installed = set(QFontDatabase.families())
+    families = [myanmar_family]
+    for candidate in LATIN_FONT_CANDIDATES:
+        if candidate in installed and candidate != myanmar_family:
+            families.insert(0, candidate)
+            break
+    for candidate in CJK_FONT_CANDIDATES:
+        if candidate in installed and candidate not in families:
+            families.append(candidate)
+            break
+    font = QFont()
+    font.setFamilies(families)
+    font.setPointSize(11)
+    font.setStyleHint(QFont.StyleHint.SansSerif)
+    return font
+
+
 def main():
     init_db()
     app = QApplication(sys.argv)
     font_family = resolve_myanmar_font_family()
-    app.setFont(QFont(font_family, 11))
+    app.setFont(build_ui_font(font_family))
     app.setStyleSheet(STYLESHEET)
     window = VocabApp()
     window.show()
