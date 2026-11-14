@@ -88,10 +88,38 @@ pyinstaller VocabApp.spec
 
 The executable is created in the `dist` directory. Build with `--add-data "fonts;fonts"` (or `datas = [("fonts", "fonts")]` in the spec) so the Myanmar fallback font is bundled; `vocapp.py` reads it from `sys._MEIPASS` and keeps `vocabulary.db` beside the executable.
 
+## Build an Android APK
+
+Requires Linux (or macOS) and JDK 17+. One-time setup downloads the Android
+NDK/SDK automatically (~3 GB into `~/.pyside6_android_deploy`):
+
+```bash
+# 1. Android build prerequisites (into the active environment)
+pip install -r .env/lib/python3.12/site-packages/PySide6/scripts/requirements-android.txt
+
+# 2. Official PySide6 Android wheels (public Qt archive, ~86 MB)
+curl -L -o android_wheels/pyside6-android_aarch64.whl \
+  https://download.qt.io/official_releases/QtForPython/pyside6/pyside6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl
+curl -L -o android_wheels/shiboken6-android_aarch64.whl \
+  https://download.qt.io/official_releases/QtForPython/shiboken6/shiboken6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl
+
+# 3. Build the APK (entry point is main.py)
+pyside6-android-deploy --name=VocApp \
+  --wheel-pyside=android_wheels/pyside6-android_aarch64.whl \
+  --wheel-shiboken=android_wheels/shiboken6-android_aarch64.whl
+```
+
+The APK is written next to the project (`buildozer/bin/` or `build/`). Install it
+on the phone by sideloading (`adb install <file>.apk` or copy + open). On first
+launch the app copies the bundled Myanmar fonts and the bundled
+`vocabulary.db` (with already-downloaded sounds) into its private storage, so
+it starts with the full vocabulary and plays sounds offline.
+
 ## Project Files
 
 ```text
 vocapp.py          Main PySide6 application
+main.py            Android entry point (pyside6-android-deploy)
 VocabApp.spec      PyInstaller build configuration
 requirements.txt   Python package requirements
 fonts/             Optional Myanmar font files

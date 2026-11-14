@@ -9,3 +9,10 @@ env
 __pycache__
 vocabulary_backup.db
 vocabulary_backup.db.sha256
+android_wheels/
+.buildozer/
+.buildozer-android/
+buildozer/
+deployment/
+deployment_data/
+vocabulary_seed.db

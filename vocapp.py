@@ -35,10 +35,14 @@ except ImportError:  # playback disabled — buttons show a hint instead
 # _MEIPASS folder, but the database must stay next to the executable so it
 # survives restarts.
 BUNDLE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-FONT_DIR = os.path.join(BUNDLE_DIR, "fonts")
-DB_FILE = os.path.join(os.path.dirname(os.path.abspath(sys.executable
-                                                      if getattr(sys, "frozen", False)
-                                                      else __file__)), "vocabulary.db")
+# On Android the packaged app directory is read-only; the entry point
+# (main.py) seeds VOCAPP_DATA_DIR with the writable app-data location.
+DATA_DIR = os.environ.get("VOCAPP_DATA_DIR") or BUNDLE_DIR
+# Fonts ship in the bundle on desktop and are copied into the writable
+# data dir on Android, so check both.
+_font_dirs = [os.path.join(BUNDLE_DIR, "fonts"), os.path.join(DATA_DIR, "fonts")]
+FONT_DIR = next((p for p in _font_dirs if os.path.isdir(p)), _font_dirs[0])
+DB_FILE = os.path.join(DATA_DIR, "vocabulary.db")
 SEARCH_PLACEHOLDER = "Search words…"
 CATEGORIES = ("TOEIC", "TextBook")
 
