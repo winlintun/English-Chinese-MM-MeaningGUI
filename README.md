@@ -11,6 +11,10 @@ VocApp is a small desktop vocabulary manager built with Python and PySide6 (Qt).
 - Open a quiz window with up to 10 randomly selected words.
 - Use Myanmar-compatible fonts when available.
 - Package the application as a Windows executable with PyInstaller.
+- Pronunciation audio: word sounds are downloaded from MyOrdbok automatically
+  when a word is saved (existing words are backfilled at startup) and stored
+  inside `vocabulary.db`, so they replay offline. Play them with the
+  🔊 buttons in the word list / editor or with `Ctrl+P`.
 
 ## Requirements
 

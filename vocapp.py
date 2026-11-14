@@ -2,23 +2,34 @@ import csv
 import datetime
 import hashlib
 import html
+import http.cookiejar
 import json
 import os
 import re
 import sqlite3
 import sys
+import tempfile
 import threading
+import time
 import unicodedata
 import urllib.parse
 import urllib.request
 
-from PySide6.QtCore import QMarginsF, QSizeF, Qt, QEvent, QObject, QTimer, Signal
+from PySide6.QtCore import QMarginsF, QSizeF, Qt, QEvent, QObject, QTimer, QUrl, Signal
 from PySide6.QtGui import QFont, QFontDatabase, QKeySequence, QPageLayout, QPageSize, QPdfWriter, QShortcut, QTextDocument
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
+
+# MP3 playback needs QtMultimedia; sound downloads still work without it.
+try:
+    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+    MULTIMEDIA_OK = True
+except ImportError:  # playback disabled — buttons show a hint instead
+    QAudioOutput = QMediaPlayer = None
+    MULTIMEDIA_OK = False
 
 # In a PyInstaller onefile build, bundled data (fonts) lives in the temp
 # _MEIPASS folder, but the database must stay next to the executable so it
@@ -32,6 +43,11 @@ SEARCH_PLACEHOLDER = "Search words…"
 CATEGORIES = ("TOEIC", "TextBook")
 
 MYORDBOK_URL = "https://myordbok.com/definition?q="
+# Pronunciation audio: the speech endpoint only answers once a definition
+# page has been fetched (it sets session cookies first).
+SOUND_API_URL = "https://myordbok.com/api/speech"
+SOUND_REFERER = "https://myordbok.com/definition"
+SOUND_RETRY_DELAY = 1.0  # seconds between downloads — be polite to the site
 ORNAGAI_URL = "https://www.ornagai.com/index.php/api/word/?q="
 MDBG_URL = "https://www.mdbg.net/chinese/dictionary?client=opensearch-wdb-v1&wdqb="
 HTTP_HEADERS = {
@@ -336,6 +352,79 @@ def lookup_chinese(term):
     return fallback
 
 
+_sound_opener = None
+_sound_opener_lock = threading.Lock()
+
+
+def _sound_session():
+    """One opener per app session so the MyOrdbok cookies are kept warm."""
+    global _sound_opener
+    with _sound_opener_lock:
+        if _sound_opener is None:
+            cookies = urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+            _sound_opener = urllib.request.build_opener(cookies)
+        return _sound_opener
+
+
+def _sound_http(url, referer=None, timeout=20):
+    scheme = urllib.parse.urlparse(url).scheme
+    if scheme not in ("http", "https"):
+        raise ValueError("Only http/https URLs are allowed")
+    headers = dict(HTTP_HEADERS)
+    if referer:
+        headers["Referer"] = referer
+    req = urllib.request.Request(url, headers=headers)
+    with _sound_session().open(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def _is_mp3(data):
+    """MP3 frames start with an ID3 tag or a synchronised frame header."""
+    return bool(data) and (data[:3] == b"ID3" or (data[0] == 0xFF and data[1] & 0xE0 == 0xE0))
+
+
+def fetch_sound(term):
+    """Download the English pronunciation MP3 for a word from MyOrdbok.
+
+    Returns the audio bytes, or None when the word has no sound (or the
+    network fails — callers treat None as "try again later")."""
+    term = (term or "").strip()
+    if not term:
+        return None
+    try:
+        # Warm the session: the speech endpoint requires the definition
+        # page's cookies, so fetch it first (failure is not fatal — a warm
+        # cookie jar from an earlier word may already be enough).
+        try:
+            _sound_http(MYORDBOK_URL + urllib.parse.quote_plus(term))
+        except Exception:
+            pass
+        url = SOUND_API_URL + "?" + urllib.parse.urlencode({"q": term, "l": "en"})
+        data = _sound_http(url, referer=SOUND_REFERER)
+        return data if _is_mp3(data) else None
+    except Exception:
+        return None
+
+
+def get_sound(word_id):
+    """Stored MP3 bytes for a word row (or None)."""
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        row = conn.execute("SELECT sound FROM words WHERE id=?", (word_id,)).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row and row[0] else None
+
+
+def store_sound(word_id, data):
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        conn.execute("UPDATE words SET sound=? WHERE id=?", (data, word_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def init_db():
     _harden_db_permissions()
     conn = sqlite3.connect(DB_FILE)
@@ -361,6 +450,7 @@ def init_db():
     cur.execute("PRAGMA secure_delete=ON")
     _migrate_myanmar_text(conn)
     _migrate_chinese_text(conn)
+    _migrate_sound_column(conn)
     conn.commit()
     conn.close()
     backup_database_if_changed()
@@ -390,6 +480,12 @@ def _db_data_fingerprint(conn):
         "SELECT id, english, chinese, myanmar, category FROM words ORDER BY id"
     ):
         hasher.update(repr(row).encode("utf-8"))
+    # Count rows that have pronunciation audio so a completed sound
+    # backfill counts as a change and gets into the backup too.
+    sound_count = conn.execute(
+        "SELECT COUNT(*) FROM words WHERE sound IS NOT NULL"
+    ).fetchone()[0]
+    hasher.update(("sound=%d" % sound_count).encode("utf-8"))
     return hasher.hexdigest()
 
 
@@ -466,6 +562,19 @@ def _migrate_chinese_text(conn):
             print("  %r -> %r" % (old, new))
     else:
         print("Chinese entries already use Traditional + pinyin (checked %d)" % len(rows))
+
+
+def _migrate_sound_column(conn):
+    """Add the pronunciation-audio column (MP3 bytes) for word sounds.
+    One-time, guarded by user_version."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version >= 3:
+        return
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(words)").fetchall()}
+    if "sound" not in columns:
+        conn.execute("ALTER TABLE words ADD COLUMN sound BLOB")
+        print("Added sound column for word pronunciations")
+    conn.execute("PRAGMA user_version=3")
 
 
 STYLESHEET = """
@@ -708,8 +817,14 @@ class _LookupSignals(QObject):
     finished = Signal(str, object, object)
 
 
+class _SoundSignals(QObject):
+    word_done = Signal(int, str, bool)      # word_id, english, success
+    progress = Signal(int, int, int)        # done, total, failed
+    play_ready = Signal(int, str, object)   # word_id, english, bytes
+
+
 class VocabApp(QMainWindow):
-    tree_columns = ("id", "english", "chinese", "category", "myanmar")
+    tree_columns = ("id", "english", "chinese", "category", "myanmar", "sound")
 
     def __init__(self):
         super().__init__()
@@ -724,6 +839,21 @@ class VocabApp(QMainWindow):
         self._lookup_timer.setSingleShot(True)
         self._lookup_timer.setInterval(800)
         self._lookup_timer.timeout.connect(self._start_lookup)
+
+        self.sound_signals = _SoundSignals()
+        self.sound_signals.word_done.connect(self._on_sound_saved)
+        self.sound_signals.progress.connect(self._on_sound_progress)
+        self.sound_signals.play_ready.connect(self._on_play_ready)
+        self._sound_downloading = set()
+        self._sound_lock = threading.Lock()
+        self._sound_temp_files = {}
+        self._backfill_running = False
+        self._media_player = None
+        self._audio_output = None
+        if MULTIMEDIA_OK:
+            self._media_player = QMediaPlayer(self)
+            self._audio_output = QAudioOutput(self)
+            self._media_player.setAudioOutput(self._audio_output)
 
         self.setWindowTitle("VocApp | Vocabulary Workspace")
         self.resize(1060, 700)
@@ -748,10 +878,15 @@ class VocabApp(QMainWindow):
 
         QShortcut(QKeySequence("Ctrl+F"), self, activated=self.focus_search)
         QShortcut(QKeySequence("Escape"), self, activated=self.escape_search)
+        QShortcut(QKeySequence("Ctrl+P"), self, activated=self.play_selected_sound)
 
         self.reset_search(refresh=False)
         self._refresh_filter_options()
         self.load_words()
+        # Backfill pronunciation audio for existing words once the window
+        # is up; words already having audio are skipped, so this resumes
+        # where the last run left off.
+        QTimer.singleShot(2000, self.start_sound_backfill)
 
     def _build_header(self):
         header = QFrame(objectName="header")
@@ -794,7 +929,21 @@ class VocabApp(QMainWindow):
         self.ent_cn = QLineEdit()
         self.combo_cat = QComboBox()
         self.combo_cat.addItems(CATEGORIES)
-        for col, widget in enumerate((self.ent_eng, self.ent_mm, self.ent_cn, self.combo_cat)):
+        # The English field gets a 🔊 button to preview its pronunciation
+        # (plays the stored MP3 when available, fetches online otherwise).
+        self.eng_sound_btn = QPushButton("🔊", objectName="softButton")
+        self.eng_sound_btn.setFixedWidth(44)
+        self.eng_sound_btn.setToolTip("Play pronunciation of this word (Ctrl+P)")
+        self.eng_sound_btn.setEnabled(False)
+        self.eng_sound_btn.clicked.connect(self.play_editor_sound)
+        eng_holder = QWidget()
+        eng_row = QHBoxLayout(eng_holder)
+        eng_row.setContentsMargins(0, 0, 0, 0)
+        eng_row.setSpacing(6)
+        eng_row.addWidget(self.ent_eng, 1)
+        eng_row.addWidget(self.eng_sound_btn)
+        form.addWidget(eng_holder, 1, 0)
+        for col, widget in enumerate((self.ent_mm, self.ent_cn, self.combo_cat), start=1):
             form.addWidget(widget, 1, col)
         form.setColumnStretch(0, 3)
         form.setColumnStretch(1, 3)
@@ -885,12 +1034,14 @@ class VocabApp(QMainWindow):
         header.sortIndicatorChanged.connect(self.on_sort_indicator)
         header.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
         header.setSectionsMovable(False)
-        for i, width in enumerate((48, 240, 200, 110, 270)):
+        for i, width in enumerate((48, 240, 200, 110, 270, 64)):
             self.tree.setColumnWidth(i, width)
         self.tree.setFrameShape(QFrame.StyledPanel)
         layout.addWidget(self.tree, 1)
 
         self.tree.itemDoubleClicked.connect(lambda *_: self.edit_word())
+        self.tree.itemSelectionChanged.connect(self._update_sound_buttons)
+        self.tree.itemClicked.connect(self._on_item_clicked)
         for key, slot in ((QKeySequence.Delete, self.delete_word),
                           (QKeySequence("Return"), self.edit_word)):
             shortcut = QShortcut(key, self.tree, activated=slot)
@@ -900,6 +1051,10 @@ class VocabApp(QMainWindow):
         actions.setSpacing(8)
         edit_btn = QPushButton("Edit Selected (Enter)", objectName="softButton")
         edit_btn.clicked.connect(self.edit_word)
+        self.play_sound_btn = QPushButton("🔊 Play Sound", objectName="softButton")
+        self.play_sound_btn.setToolTip("Play pronunciation of the selected word (Ctrl+P)")
+        self.play_sound_btn.setEnabled(False)
+        self.play_sound_btn.clicked.connect(self.play_selected_sound)
         delete_btn = QPushButton("Delete Selected", objectName="dangerButton")
         delete_btn.clicked.connect(self.delete_word)
         add_cn_btn = QPushButton("Add Chinese to Selected", objectName="softButton")
@@ -907,6 +1062,7 @@ class VocabApp(QMainWindow):
         quiz_btn = QPushButton("Open Quiz", objectName="accentButton")
         quiz_btn.clicked.connect(self.open_quiz)
         actions.addWidget(edit_btn)
+        actions.addWidget(self.play_sound_btn)
         actions.addWidget(delete_btn)
         actions.addWidget(add_cn_btn)
         actions.addStretch(1)
@@ -1002,6 +1158,7 @@ class VocabApp(QMainWindow):
     def _english_changed(self, text):
         self._set_hint(self.mm_hint, "", "")
         self._set_hint(self.cn_hint, "", "")
+        self.eng_sound_btn.setEnabled(MULTIMEDIA_OK and bool(normalize_myanmar_text(text)))
         if normalize_myanmar_text(text):
             self._lookup_timer.start()
         else:
@@ -1063,6 +1220,214 @@ class VocabApp(QMainWindow):
         else:
             self.status_label.setText(f"No online result found for “{eng}” — add it manually")
 
+    # ------------------------------------------------------------------ #
+    # Pronunciation sounds: downloads store MP3 bytes in the words.sound
+    # column; playback runs off the stored bytes (offline afterwards).
+    # ------------------------------------------------------------------ #
+
+    def _queue_sound_download(self, word_id, eng):
+        """Download and store the MP3 for one word in the background."""
+        if not eng or not word_id:
+            return
+        with self._sound_lock:
+            if eng in self._sound_downloading:
+                return
+            self._sound_downloading.add(eng)
+        self.status_label.setText(f"Downloading sound for “{eng}”…")
+        threading.Thread(target=self._sound_download_worker, args=(word_id, eng),
+                         daemon=True).start()
+
+    def _sound_download_worker(self, word_id, eng):
+        data = fetch_sound(eng)
+        if data:
+            store_sound(word_id, data)
+        self.sound_signals.word_done.emit(word_id, eng, bool(data))
+
+    def start_sound_backfill(self):
+        """Download audio for every existing word that has none (startup job)."""
+        if self._backfill_running:
+            return
+        conn = sqlite3.connect(DB_FILE)
+        rows = conn.execute(
+            "SELECT id, english FROM words "
+            "WHERE sound IS NULL AND TRIM(english) != '' ORDER BY id"
+        ).fetchall()
+        conn.close()
+        # Group by English term: duplicate rows share one download.
+        groups = {}
+        for word_id, eng in rows:
+            groups.setdefault(eng.strip(), []).append(word_id)
+        pending = [(eng, ids) for eng, ids in groups.items() if eng]
+        if not pending:
+            return
+        self._backfill_running = True
+        self.sound_signals.progress.emit(0, len(pending), 0)
+        threading.Thread(target=self._backfill_worker, args=(pending,), daemon=True).start()
+
+    def _backfill_worker(self, pending):
+        total = len(pending)
+        done = failed = 0
+        for eng, word_ids in pending:
+            with self._sound_lock:
+                busy = eng in self._sound_downloading
+                self._sound_downloading.add(eng)
+            data = None
+            if not busy:
+                data = fetch_sound(eng)
+                if data:
+                    for word_id in word_ids:
+                        store_sound(word_id, data)
+                else:
+                    failed += 1
+            self.sound_signals.word_done.emit(word_ids[0], eng, bool(data))
+            done += 1
+            self.sound_signals.progress.emit(done, total, failed)
+            time.sleep(SOUND_RETRY_DELAY)
+            with self._sound_lock:
+                self._sound_downloading.discard(eng)
+
+    def _on_sound_saved(self, word_id, eng, ok):
+        with self._sound_lock:
+            self._sound_downloading.discard(eng)
+        self._set_item_sound_icon(word_id, ok)
+        if self._backfill_running:
+            # The progress line is already covering the status bar.
+            return
+        if ok:
+            self.status_label.setText(f"Sound saved for “{eng}”")
+        else:
+            self.status_label.setText(f"No online sound for “{eng}” — will retry next start")
+        self._update_sound_buttons()
+
+    def _on_sound_progress(self, done, total, failed):
+        self._sound_progress_state = (done, total, failed)
+        if total and done < total:
+            # A recently played sound keeps its status line for a moment.
+            if time.time() - getattr(self, "_sound_last_play", 0) < 5:
+                return
+            detail = f"Downloading sounds… {done}/{total}"
+            if failed:
+                detail += f" ({failed} missed)"
+            self.status_label.setText(detail)
+            return
+        self._backfill_running = False
+        message = f"Sound download finished — {total - failed} of {total} words have audio"
+        if failed:
+            message += f"; {failed} will retry on next start"
+        self.status_label.setText(message)
+        self._update_sound_buttons()
+
+    def _set_item_sound_icon(self, word_id, has_sound):
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            if self._item_word_id(item) == word_id:
+                item.setText(5, "🔊" if has_sound else "")
+                return
+
+    def _update_sound_buttons(self):
+        items = self.tree.selectedItems()
+        has_audio = bool(items) and bool(items[0].text(5))
+        self.play_sound_btn.setEnabled(MULTIMEDIA_OK and has_audio)
+        if not MULTIMEDIA_OK:
+            self.play_sound_btn.setToolTip("Playback unavailable — PySide6.QtMultimedia is missing")
+
+    def _on_item_clicked(self, item, column):
+        """Clicking the Sound column cell plays that word's pronunciation."""
+        if column != 5 or item is None or self._item_word_id(item) is None:
+            return
+        self.tree.clearSelection()
+        item.setSelected(True)
+        self.play_selected_sound()
+
+    def play_selected_sound(self):
+        """Play the stored MP3 for the selected list row (Ctrl+P)."""
+        items = self.tree.selectedItems()
+        if not items:
+            self.status_label.setText("Select a word first to play its sound")
+            return
+        word_id = self._item_word_id(items[0])
+        eng = items[0].text(1)
+        data = get_sound(word_id) if word_id else None
+        if data:
+            self._play_sound_bytes(eng, data)
+            self.status_label.setText(f"Playing sound for “{eng}”")
+            return
+        if not MULTIMEDIA_OK:
+            self.status_label.setText("Playback unavailable — PySide6.QtMultimedia is missing")
+            return
+        with self._sound_lock:
+            if eng in self._sound_downloading:
+                return
+            self._sound_downloading.add(eng)
+        self.status_label.setText(f"Sound not stored yet for “{eng}” — fetching online…")
+        threading.Thread(target=self._play_online_worker, args=(word_id, eng),
+                         daemon=True).start()
+
+    def play_editor_sound(self):
+        """Play the pronunciation of the word being typed in the editor."""
+        eng = normalize_myanmar_text(self.ent_eng.text()).strip()
+        if not eng:
+            self.status_label.setText("Type an English word first to hear its sound")
+            return
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            row = conn.execute(
+                "SELECT sound FROM words "
+                "WHERE english = ? COLLATE NOCASE AND sound IS NOT NULL LIMIT 1",
+                (eng,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row and row[0]:
+            self._play_sound_bytes(eng, row[0])
+            self.status_label.setText(f"Playing sound for “{eng}”")
+            return
+        if not MULTIMEDIA_OK:
+            self.status_label.setText("Playback unavailable — PySide6.QtMultimedia is missing")
+            return
+        with self._sound_lock:
+            if eng in self._sound_downloading:
+                return
+            self._sound_downloading.add(eng)
+        self.status_label.setText(f"Fetching sound for “{eng}” online…")
+        threading.Thread(target=self._play_online_worker, args=(None, eng), daemon=True).start()
+
+    def _play_online_worker(self, word_id, eng):
+        data = fetch_sound(eng)
+        if data and word_id:
+            store_sound(word_id, data)
+        self.sound_signals.play_ready.emit(word_id or 0, eng, data)
+
+    def _on_play_ready(self, word_id, eng, data):
+        with self._sound_lock:
+            self._sound_downloading.discard(eng)
+        if data:
+            if word_id:
+                self._set_item_sound_icon(word_id, True)
+                self._update_sound_buttons()
+            self._play_sound_bytes(eng, data)
+            self.status_label.setText(f"Playing sound for “{eng}”")
+        else:
+            self.status_label.setText(f"No online sound found for “{eng}”")
+
+    def _play_sound_bytes(self, term, data):
+        if not MULTIMEDIA_OK:
+            self.status_label.setText("Playback unavailable — PySide6.QtMultimedia is missing")
+            return
+        try:
+            self._sound_last_play = time.time()
+            path = self._sound_temp_files.get(term)
+            if path is None or not os.path.exists(path) or os.path.getsize(path) != len(data):
+                handle, path = tempfile.mkstemp(prefix="vocapp_", suffix=".mp3")
+                with os.fdopen(handle, "wb") as out:
+                    out.write(data)
+                self._sound_temp_files[term] = path
+            self._media_player.stop()
+            self._media_player.setSource(QUrl.fromLocalFile(path))
+            self._media_player.play()
+        except Exception as exc:
+            self.status_label.setText(f"Could not play sound: {exc}")
+
     def submit_word(self):
         if self.editing_id is None:
             self.save_word()
@@ -1110,6 +1475,7 @@ class VocabApp(QMainWindow):
         self._refresh_filter_options()
         self.load_words()
         self._reveal_word(word_id)
+        self._queue_sound_download(word_id, eng)
         self.status_label.setText(f"Saved “{eng}” as {cat}")
         self.ent_eng.setFocus()
 
@@ -1140,6 +1506,7 @@ class VocabApp(QMainWindow):
         self.ent_mm.setText(values[4])
         self.combo_cat.setCurrentText(self.normalize_category(values[3]))
         self.editing_id = word_id
+        self._editing_english = values[1]
         self.save_button.setText("Update")
         self.cancel_button.setEnabled(True)
         self.ent_eng.setFocus()
@@ -1164,16 +1531,21 @@ class VocabApp(QMainWindow):
         except sqlite3.Error as exc:
             QMessageBox.critical(self, "Save failed", f"Could not update the word:\n{exc}")
             return
+        previous_english = getattr(self, "_editing_english", None)
         self.cancel_edit()
         self._clear_filter()
         self._refresh_filter_options()
         self.load_words()
         self._reveal_word(word_id)
+        # Re-download when the English word changed or no audio exists yet.
+        if eng != previous_english or get_sound(word_id) is None:
+            self._queue_sound_download(word_id, eng)
         self.status_label.setText(f"Updated word #{word_id}")
         self.ent_eng.setFocus()
 
     def cancel_edit(self):
         self.editing_id = None
+        self._editing_english = None
         self.save_button.setText("Save Word")
         self.cancel_button.setEnabled(False)
         self.combo_cat.setCurrentText(CATEGORIES[0])
@@ -1249,6 +1621,9 @@ class VocabApp(QMainWindow):
         col = self.tree_columns[self.sort_col]
         if col == "id":
             sql_order = f"words.id {order}"
+        elif col == "sound":
+            # Words that already have audio group together.
+            sql_order = f"(words.sound IS NULL) {order}, words.id DESC"
         else:
             sql_order = f"{col} COLLATE NOCASE {order}, words.id DESC"
         clauses = []
@@ -1286,16 +1661,26 @@ class VocabApp(QMainWindow):
 
         self.tree.clear()
         for row_number, row in enumerate(rows, start=1):
-            # Query order is (id, english, chinese, category, myanmar).
-            word_id, english, chinese, category, myanmar = (
+            # Query order is (id, english, chinese, category, myanmar, sound).
+            word_id, english, chinese, category, myanmar, sound = (
                 row[0], row[1], row[2],
                 row[3] if len(row) > 4 and row[3] else CATEGORIES[0],
                 row[4] if len(row) > 4 else "",
+                row[5] if len(row) > 5 else None,
             )
             # Show a sequential number 1..N for the current view; keep the
             # real database id in the item's UserRole data for edit/delete.
-            item = QTreeWidgetItem((str(row_number), english or "", chinese or "", category, myanmar or ""))
+            item = QTreeWidgetItem((
+                str(row_number), english or "", chinese or "", category,
+                myanmar or "", "🔊" if sound else "",
+            ))
             item.setData(0, Qt.ItemDataRole.UserRole, word_id)
+            item.setTextAlignment(5, Qt.AlignmentFlag.AlignCenter)
+            item.setToolTip(
+                5,
+                "Click to play pronunciation"
+                if sound else "Click to download & play pronunciation",
+            )
             self.tree.addTopLevelItem(item)
 
         if len(rows) == 0:
@@ -1305,7 +1690,7 @@ class VocabApp(QMainWindow):
                 message = "No %s words yet — add one above" % category
             else:
                 message = "Your library is empty — add your first word above"
-            item = QTreeWidgetItem(("", message, "", "", ""))
+            item = QTreeWidgetItem(("", message, "", "", "", ""))
             item.setForeground(1, self.palette().color(self.palette().ColorRole.Mid))
             self.tree.addTopLevelItem(item)
 
@@ -1321,6 +1706,13 @@ class VocabApp(QMainWindow):
         if term:
             parts.append(f"filter: \u201c{term}\u201d")
         self.status_label.setText(f"{len(rows)} shown" + (" • " + " • ".join(parts) if parts else ""))
+        if self._backfill_running:
+            # Keep the download progress visible after list refreshes.
+            done, total, failed = getattr(self, "_sound_progress_state", (0, 0, 0))
+            detail = f" • downloading sounds… {done}/{total}"
+            if failed:
+                detail += f" ({failed} missed)"
+            self.status_label.setText(self.status_label.text() + detail)
 
     def _total_count(self):
         conn = sqlite3.connect(DB_FILE)
