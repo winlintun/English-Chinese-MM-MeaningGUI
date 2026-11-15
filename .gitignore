@@ -1,18 +1,33 @@
-note.md
-*.db-wal
-*.db-shm
+# Built APK / build artifacts
+*.apk
+*.aab
+bin/
+.buildozer/
+deployment/
+android_wheels/
+pysidedeploy.spec
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environment (.env folder is a venv in this project)
 .env/
-*.spec
-build
-dist
-env
-__pycache__
+.venv/
+venv/
+
+# Secrets / local config
+*.env
+!.env.example
+
+# Database (user data, changes constantly)
+!*.db
+*.db-sha256
 vocabulary_backup.db
 vocabulary_backup.db.sha256
-android_wheels/
-.buildozer/
-.buildozer-android/
-buildozer/
-deployment/
-deployment_data/
-vocabulary_seed.db
+
+# Generated exports
+export_data/*.pdf
+!export_data/book*.pdf
