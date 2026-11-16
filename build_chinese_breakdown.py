@@ -205,12 +205,24 @@ def seed_from_words(conn):
     print("Seeded %d curated gloss(es) from single-hanzi words" % seeded)
 
 
-def _translatable_term(english):
-    """First English sense, cleaned up for the dictionary lookup."""
-    term = english.split(" / ")[0]
-    term = re.sub(r"\([^)]*\)", "", term)
-    term = re.sub(r"^(to|a|an|the)\s+", "", term.strip())
-    return term.strip()
+def _translatable_candidates(english):
+    """Cleaned-up lookup candidates derived from the English glosses.
+
+    Dictionary glosses like "person; people" or "to go out; to come out"
+    are no good as a dictionary query, so split them into single words and
+    strip grammatical noise: most specific phrase first."""
+    seen = []
+    for sense in english.split(" / "):
+        for part in re.split(r"[;,]", sense):
+            part = re.sub(r"\([^)]*\)", "", part)          # (bound form) …
+            part = re.sub(r"~[^ ]*\s*", "", part)          # ~'s, ~ber
+            part = re.sub(r"^(to|a|an|the)\s+", "", part.strip())
+            part = part.strip(" .…-")
+            if len(part) < 2 or not re.fullmatch(r"[A-Za-z' ]+", part):
+                continue
+            if part.lower() not in seen:
+                seen.append(part.lower())
+    return seen
 
 
 def suggest_myanmar(conn, limit):
@@ -230,12 +242,17 @@ def suggest_myanmar(conn, limit):
         row = conn.execute(
             "SELECT myanmar, english, source FROM hanzi WHERE hanzi=?", (char,)).fetchone()
         if row and row[2] != "curated" and not row[0] and row[1]:
-            targets.append((char, _translatable_term(row[1])))
+            targets.append((char, _translatable_candidates(row[1])))
     print("Suggesting Myanmar glosses for %d character(s)…" % len(targets))
     done = failed = 0
-    for index, (char, term) in enumerate(targets, 1):
-        result = vocapp.lookup_myanmar(term)
-        if result and any("\u1000" <= ch <= "\u109f" for ch in result):
+    for index, (char, candidates) in enumerate(targets, 1):
+        result = None
+        for term in candidates:
+            result = vocapp.lookup_myanmar(term)
+            if result and any("\u1000" <= ch <= "\u109f" for ch in result):
+                break
+            result = None
+        if result:
             conn.execute(
                 "UPDATE hanzi SET myanmar=?, source='auto', updated_at=? WHERE hanzi=?",
                 (vocapp.normalize_myanmar_text(result), _now(), char))
