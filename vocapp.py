@@ -18,9 +18,9 @@ import urllib.request
 from PySide6.QtCore import QMarginsF, QSizeF, Qt, QEvent, QObject, QTimer, QUrl, Signal
 from PySide6.QtGui import QFont, QFontDatabase, QKeySequence, QPageLayout, QPageSize, QPdfWriter, QShortcut, QTextDocument
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+    QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 # MP3 playback needs QtMultimedia; sound downloads still work without it.
@@ -253,6 +253,220 @@ def normalize_chinese_entry(text):
     return "".join(out)
 
 
+def split_chinese_entries(text):
+    """Parse a words.chinese value into its comma-separated entries.
+
+    Returns a list of dicts with:
+      entry_index  position of the entry within the original field
+      core         hanzi part with any "(pinyin)" suffix removed
+      pinyin       the stored pinyin ("" when absent)
+      display      the entry exactly as stored (for the breakdown header)
+    Entries without any hanzi are skipped."""
+    entries = []
+    for index, part in enumerate(re.split(r"[,，]", text or "")):
+        part = part.strip()
+        if not part or not _HANZI_RE.search(part):
+            continue
+        core = part
+        pinyin = ""
+        match = re.match(r"^(.*\S)\s*[（(]\s*([^（）()]*)[）)]\s*$", part)
+        if match and _looks_like_pinyin(match.group(2).strip()):
+            core = match.group(1).strip()
+            pinyin = match.group(2).strip()
+        entries.append({
+            "entry_index": index,
+            "core": core,
+            "pinyin": pinyin,
+            "display": part,
+        })
+    return entries
+
+
+def _contextual_pinyin(chars):
+    """Tone-marked pinyin for each hanzi in a run, read in word context so
+    polyphones (行 xíng "to go" vs háng "row") resolve like the real word.
+    Falls back to the per-character generator and to "" — never raises."""
+    if not chars:
+        return []
+    try:
+        from pypinyin import Style, pinyin as _pinyin
+    except ImportError:
+        return [_generate_pinyin(ch) for ch in chars]
+    readings = _pinyin("".join(chars), style=Style.TONE)
+    return [(item[0] if item else "") for item in readings]
+
+
+_PINYIN_INITIALS = set("bpmfdtnlgkhjqxzcsyw")
+_PINYIN_CODA = set("ngr")
+
+
+def _split_pinyin_syllables(pinyin):
+    """Split a run-on tone-marked pinyin string ("chéngjì") into syllables.
+
+    Best effort, following standard pinyin spelling rules: syllables start at
+    an initial consonant, n/ng/r close a syllable, and apostrophes separate
+    syllables that start with a vowel. Neutral-tone syllables (no tone mark)
+    are kept as-is."""
+    text = (pinyin or "").strip()
+    if not text:
+        return []
+    chars = list(text)
+    syllables = []
+    current = ""
+    for index, ch in enumerate(chars):
+        if ch in ("'", " ", "/"):
+            if current:
+                syllables.append(current)
+                current = ""
+            continue
+        if ch not in _PINYIN_INITIALS:  # vowels and tone marks
+            current += ch
+            continue
+        if not current:
+            current = ch
+            continue
+        previous = chars[index - 1]
+        if ch == "h" and previous in "csz":  # inside the sh/zh/ch clusters
+            current += ch
+            continue
+        if ch == "n":
+            nxt = chars[index + 1] if index + 1 < len(chars) else ""
+            if nxt and nxt not in _PINYIN_INITIALS:  # a vowel follows -> initial
+                syllables.append(current)
+                current = ch
+                continue
+        if ch in _PINYIN_CODA:  # n/ng/r closing the syllable
+            current += ch
+            continue
+        syllables.append(current)
+        current = ch
+    if current:
+        syllables.append(current)
+    return [syl[0].lower() + syl[1:] if syl else syl for syl in syllables]
+
+
+def _hanzi_glosses(conn):
+    """Load the shared per-character dictionary: hanzi char -> info dict."""
+    glosses = {}
+    for row in conn.execute(
+        "SELECT hanzi, simplified, pinyin, english, myanmar, reading_note, source FROM hanzi"
+    ):
+        glosses[row[0]] = {
+            "simplified": row[1] or "",
+            "pinyin": row[2] or "",
+            "english": row[3] or "",
+            "myanmar": row[4] or "",
+            "note": row[5] or "",
+            "source": row[6] or "",
+        }
+    return glosses
+
+
+def _entry_rows(entry, glosses, whole):
+    """Compute the word_chars rows for one comma-separated entry.
+
+    Returns (position, hanzi, pinyin, english, myanmar, note) tuples.
+    `whole` renders the entry as a single unit; otherwise one row is produced
+    per hanzi code point (spaces/punctuation are dropped)."""
+    core = entry["core"]
+    hanzi_chars = _HANZI_RE.findall(core)
+    if whole or len(hanzi_chars) <= 1:
+        pinyin = entry["pinyin"] or "".join(_contextual_pinyin(hanzi_chars))
+        info = glosses.get("".join(hanzi_chars)) or glosses.get(core) or {}
+        return [(0, core, pinyin, info.get("english", ""), info.get("myanmar", ""),
+                 info.get("note", ""))]
+    readings = _contextual_pinyin(hanzi_chars)
+    # The stored word pinyin comes from the dictionary and is read in this
+    # word's context — prefer it per character when the syllable counts line
+    # up (this keeps e.g. 績 = jì in 成績 instead of the bare-character jī).
+    stored = _split_pinyin_syllables(entry["pinyin"]) if entry["pinyin"] else []
+    if len(stored) == len(hanzi_chars):
+        readings = stored
+    rows = []
+    for position, char in enumerate(hanzi_chars):
+        info = glosses.get(char, {})
+        rows.append((position, char, readings[position] if position < len(readings) else "",
+                     info.get("english", ""), info.get("myanmar", ""), info.get("note", "")))
+    return rows
+
+
+def rebuild_word_chars(conn, word_ids=None):
+    """(Re)compute word_chars rows from words.chinese + the hanzi dictionary.
+
+    Split rules ("a wrong split is worse than no split"):
+      - single-character entries always render as one row;
+      - 'whole' mode renders each entry as one unit;
+      - otherwise an entry is split per character only when every character
+        is present in the shared hanzi dictionary (transliterations and bound
+        morphemes whose characters are unknown stay whole).
+
+    Idempotent: a word's rows are replaced only when they actually changed.
+    Returns the number of words whose rows were rewritten."""
+    glosses = _hanzi_glosses(conn)
+    if word_ids:
+        words = conn.execute(
+            "SELECT id, chinese, breakdown_mode FROM words WHERE id IN (%s)"
+            % ",".join("?" * len(word_ids)), list(word_ids)).fetchall()
+    else:
+        words = conn.execute(
+            "SELECT id, chinese, breakdown_mode FROM words "
+            "WHERE chinese IS NOT NULL AND chinese != ''").fetchall()
+    changed = 0
+    for word_id, chinese, mode in words:
+        computed = []
+        for entry in split_chinese_entries(chinese):
+            chars = _HANZI_RE.findall(entry["core"])
+            whole = (mode == "whole") or (
+                len(chars) > 1 and any(ch not in glosses for ch in chars))
+            for row in _entry_rows(entry, glosses, whole):
+                computed.append((entry["entry_index"],) + row)
+        existing = [
+            tuple(v if v is not None else "" for v in row)
+            for row in conn.execute(
+                "SELECT entry_index, position, hanzi, pinyin, english, myanmar, note "
+                "FROM word_chars WHERE word_id=? ORDER BY entry_index, position",
+                (word_id,))
+        ]
+        if existing != computed:
+            conn.execute("DELETE FROM word_chars WHERE word_id=?", (word_id,))
+            conn.executemany(
+                "INSERT INTO word_chars (word_id, entry_index, position, hanzi, "
+                "pinyin, english, myanmar, note) VALUES (?,?,?,?,?,?,?,?)",
+                [(word_id,) + row for row in computed])
+            changed += 1
+    return changed
+
+
+def load_word_breakdown(word_id):
+    """Everything the breakdown dialog needs for one word.
+
+    Returns (chinese, myanmar, mode, entries, rows) or None when the word has
+    no Chinese text. Words saved before a breakdown rebuild get their rows
+    computed on the fly."""
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        row = conn.execute(
+            "SELECT chinese, myanmar, breakdown_mode FROM words WHERE id=?", (word_id,)
+        ).fetchone()
+        if not row or not (row[0] or "").strip():
+            return None
+        chinese, myanmar, mode = row[0], row[1] or "", row[2] or "auto"
+        rows = conn.execute(
+            "SELECT entry_index, position, hanzi, pinyin, english, myanmar, note "
+            "FROM word_chars WHERE word_id=? ORDER BY entry_index, position",
+            (word_id,)).fetchall()
+        if not rows:
+            rebuild_word_chars(conn, [word_id])
+            conn.commit()
+            rows = conn.execute(
+                "SELECT entry_index, position, hanzi, pinyin, english, myanmar, note "
+                "FROM word_chars WHERE word_id=? ORDER BY entry_index, position",
+                (word_id,)).fetchall()
+        return chinese, myanmar, mode, split_chinese_entries(chinese), rows
+    finally:
+        conn.close()
+
+
 def _http_get(url, timeout=10):
     scheme = urllib.parse.urlparse(url).scheme
     if scheme not in ("http", "https"):
@@ -268,23 +482,44 @@ def _strip_tags(fragment):
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _myordbok_og_meanings(page):
+    """Definitions from the current MyOrdbok layout, where the page is
+    rendered client-side and the meanings live in the og:description meta:
+    '"gold" in Myanmar (noun, adjective): ရွှေ, ငွေ အမြောက်အမြား, …'."""
+    og = re.search(r'<meta property="og:description" content="([^"]*)"', page or "")
+    if not og:
+        return []
+    content = html.unescape(og.group(1))
+    start = None
+    for index, ch in enumerate(content):
+        if "\u1000" <= ch <= "\u109f":  # first Myanmar glyph = start of meanings
+            start = index
+            break
+    if start is None:
+        return []
+    return [p.strip() for p in re.split(r"[,၊]", content[start:]) if p.strip()]
+
+
 def lookup_myanmar(term):
     try:
         page = _http_get(MYORDBOK_URL + urllib.parse.quote_plus(term))
-        meanings = re.findall(r'<div class="mean">\s*<p>(.*?)</p>', page, re.S)
-        candidates = [_strip_tags(m) for m in meanings if _strip_tags(m)]
-        for candidate in candidates:
-            if any("\u1000" <= ch <= "\u109f" for ch in candidate):
-                if candidate.startswith("~"):
-                    parts = [p for p in candidate[1:].split()
-                             if any("\u1000" <= ch <= "\u109f" for ch in p)]
-                    if parts:
-                        return " ".join(parts)
-                return candidate
-        if candidates:
-            return candidates[0]
     except Exception:
-        pass
+        page = ""
+    # Current layout (client-rendered): meanings are in the og:description meta.
+    for candidate in _myordbok_og_meanings(page):
+        return candidate
+    meanings = re.findall(r'<div class="mean">\s*<p>(.*?)</p>', page, re.S)
+    candidates = [_strip_tags(m) for m in meanings if _strip_tags(m)]
+    for candidate in candidates:
+        if any("\u1000" <= ch <= "\u109f" for ch in candidate):
+            if candidate.startswith("~"):
+                parts = [p for p in candidate[1:].split()
+                         if any("\u1000" <= ch <= "\u109f" for ch in p)]
+                if parts:
+                    return " ".join(parts)
+            return candidate
+    if candidates:
+        return candidates[0]
     try:
         page = _http_get(ORNAGAI_URL + urllib.parse.quote_plus(term) + "&return=json")
         data = json.loads(page)
@@ -455,6 +690,7 @@ def init_db():
     _migrate_myanmar_text(conn)
     _migrate_chinese_text(conn)
     _migrate_sound_column(conn)
+    _migrate_chinese_chars(conn)
     conn.commit()
     conn.close()
     backup_database_if_changed()
@@ -490,6 +726,19 @@ def _db_data_fingerprint(conn):
         "SELECT COUNT(*) FROM words WHERE sound IS NOT NULL"
     ).fetchone()[0]
     hasher.update(("sound=%d" % sound_count).encode("utf-8"))
+    # The character-breakdown tables and per-word split mode are data too:
+    # curating a gloss or toggling "show as one word" must trigger a backup.
+    for row in conn.execute(
+        "SELECT word_id, entry_index, position, hanzi, pinyin, english, myanmar, note "
+        "FROM word_chars ORDER BY word_id, entry_index, position"
+    ):
+        hasher.update(repr(row).encode("utf-8"))
+    for row in conn.execute("SELECT id, breakdown_mode FROM words ORDER BY id"):
+        hasher.update(repr(row).encode("utf-8"))
+    for row in conn.execute(
+        "SELECT hanzi, pinyin, english, myanmar, reading_note, source FROM hanzi ORDER BY hanzi"
+    ):
+        hasher.update(repr(row).encode("utf-8"))
     return hasher.hexdigest()
 
 
@@ -579,6 +828,50 @@ def _migrate_sound_column(conn):
         conn.execute("ALTER TABLE words ADD COLUMN sound BLOB")
         print("Added sound column for word pronunciations")
     conn.execute("PRAGMA user_version=3")
+
+
+def _migrate_chinese_chars(conn):
+    """Create the per-character breakdown tables (feature-do.md).
+
+    The breakdown data itself is precomputed on desktop by
+    build_chinese_breakdown.py and shipped inside vocabulary.db; this
+    migration only provides the schema so the app never crashes when the
+    tables are missing. One-time, guarded by user_version."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version >= 4:
+        return
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS hanzi (
+            hanzi        TEXT PRIMARY KEY,
+            simplified   TEXT,
+            pinyin       TEXT,
+            english      TEXT,
+            myanmar      TEXT,
+            reading_note TEXT,
+            source       TEXT DEFAULT 'cedict',
+            updated_at   TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS word_chars (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            word_id     INTEGER NOT NULL REFERENCES words(id) ON DELETE CASCADE,
+            entry_index INTEGER NOT NULL,
+            position    INTEGER NOT NULL,
+            hanzi       TEXT NOT NULL,
+            pinyin      TEXT,
+            english     TEXT,
+            myanmar     TEXT,
+            note        TEXT,
+            UNIQUE(word_id, entry_index, position)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_word_chars_word ON word_chars(word_id)")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(words)").fetchall()}
+    if "breakdown_mode" not in columns:
+        conn.execute("ALTER TABLE words ADD COLUMN breakdown_mode TEXT DEFAULT 'auto'")
+    conn.execute("PRAGMA user_version=4")
+    print("Added hanzi/word_chars tables and breakdown_mode column")
 
 
 STYLESHEET = """
@@ -702,6 +995,36 @@ QHeaderView::section:hover { background: %(soft_hover)s; }
 
 #statusFrame { background: %(border)s; border: none; }
 #statusLabel { background: %(border)s; color: %(muted)s; font-size: 9pt; padding: 6px 24px; }
+
+#breakdownHeader { color: %(header)s; font-size: 16pt; font-weight: bold; }
+#wordMeaning { color: %(accent_dark)s; font-size: 11pt; font-weight: bold; }
+#entryLabel { color: %(muted)s; font-weight: bold; font-size: 10pt; }
+#charCard {
+    background: %(card)s;
+    border: 1px solid %(border)s;
+    border-radius: 6px;
+}
+#charHanzi { color: %(header)s; font-size: 20pt; font-weight: bold; background: transparent; }
+#charPinyin { color: %(accent_dark)s; font-size: 11pt; background: transparent; }
+#charEnglish { color: %(text)s; font-size: 10pt; background: transparent; }
+#charMyanmar { color: %(text)s; font-size: 11pt; font-weight: bold; background: transparent; }
+#charNote { color: %(muted)s; font-size: 9pt; background: transparent; }
+#mutedValue { color: %(muted)s; font-size: 10pt; background: transparent; }
+#autoChip {
+    background: %(soft)s;
+    color: %(muted)s;
+    border-radius: 8px;
+    padding: 2px 10px;
+    font-size: 8pt;
+}
+#curatedChip {
+    background: %(selected)s;
+    color: %(accent_dark)s;
+    border-radius: 8px;
+    padding: 2px 10px;
+    font-size: 8pt;
+}
+QScrollArea { background: %(bg)s; border: none; }
 """ % COLORS
 
 
@@ -827,6 +1150,255 @@ class _SoundSignals(QObject):
     play_ready = Signal(int, str, object)   # word_id, english, bytes
 
 
+class ChineseBreakdownDialog(QDialog):
+    """Character-by-character view of a Chinese entry (feature-do.md §7.2).
+
+    Shows the whole-word meaning first, then one card per character with the
+    contextual pinyin, English glosses and Myanmar glosses. Characters can be
+    tapped to curate their Myanmar gloss; "Show as one word" persists
+    breakdown_mode for words that should not be split."""
+
+    def __init__(self, parent, chinese, word_myanmar, mode, entries, rows, word_id=None):
+        super().__init__(parent)
+        self.setWindowTitle("VocApp | စာလုံးလိုက် အဓိပ္ပာယ်")
+        self.setModal(True)
+        self._chinese = chinese
+        self._word_myanmar = word_myanmar
+        self._word_id = word_id
+        self._mode = mode or "auto"
+        self._entries = entries
+        self._rows = rows
+        self._sources = self._load_sources()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(8)
+
+        header = QLabel(chinese, objectName="breakdownHeader")
+        header.setWordWrap(True)
+        layout.addWidget(header)
+        if word_myanmar:
+            meaning = QLabel("စာလုံးတစ်ခုလုံး — %s" % word_myanmar, objectName="wordMeaning")
+            meaning.setWordWrap(True)
+            layout.addWidget(meaning)
+
+        toggle_row = QHBoxLayout()
+        toggle_row.setSpacing(8)
+        if word_id:
+            self.whole_toggle = QCheckBox("Show as one word (မခွဲဘဲ ပြရန်)")
+            self.whole_toggle.setChecked(self._mode == "whole")
+            self.whole_toggle.toggled.connect(self._set_mode)
+            toggle_row.addWidget(self.whole_toggle)
+            rebuild_btn = QPushButton("Rebuild breakdown", objectName="softButton")
+            rebuild_btn.clicked.connect(self._rebuild)
+            toggle_row.addWidget(rebuild_btn)
+        toggle_row.addStretch(1)
+        layout.addLayout(toggle_row)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.cards_host = QWidget()
+        self.cards_layout = QVBoxLayout(self.cards_host)
+        self.cards_layout.setContentsMargins(0, 4, 4, 4)
+        self.cards_layout.setSpacing(10)
+        self.cards_layout.addStretch(1)
+        self.scroll.setWidget(self.cards_host)
+        layout.addWidget(self.scroll, 1)
+
+        self._populate()
+
+        # Fill the available space (mobile-friendly), never larger than a
+        # sane desktop size.
+        if parent is not None:
+            self.resize(min(parent.width() - 40, 720), min(parent.height() - 40, 680))
+        else:
+            self.resize(720, 680)
+
+    # -- data -----------------------------------------------------------
+
+    def _load_sources(self):
+        """hanzi char -> source, so glosses can be marked auto vs curated."""
+        sources = {}
+        if not self._rows:
+            return sources
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            for hanzi, source in conn.execute("SELECT hanzi, source FROM hanzi"):
+                sources[hanzi] = source or ""
+        finally:
+            conn.close()
+        return sources
+
+    def _reload(self):
+        if not self._word_id:
+            return
+        data = load_word_breakdown(self._word_id)
+        if not data:
+            return
+        (self._chinese, self._word_myanmar, self._mode,
+         self._entries, self._rows) = data
+        self._sources = self._load_sources()
+        self._populate()
+
+    # -- persistence ----------------------------------------------------
+
+    def _set_mode(self, whole):
+        """Persist the split/whole choice so exceptions are curated once."""
+        if not self._word_id:
+            return
+        mode = "whole" if whole else "auto"
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            conn.execute("UPDATE words SET breakdown_mode=? WHERE id=?", (mode, self._word_id))
+            rebuild_word_chars(conn, [self._word_id])
+            conn.commit()
+        finally:
+            conn.close()
+        self._mode = mode
+        self._reload()
+
+    def _rebuild(self):
+        if not self._word_id:
+            return
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            rebuild_word_chars(conn, [self._word_id])
+            conn.commit()
+        finally:
+            conn.close()
+        self._reload()
+
+    def _save_gloss(self, char, myanmar):
+        """Curate the Myanmar gloss of one character (source='curated')."""
+        myanmar = normalize_myanmar_text(myanmar)
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            now = datetime.datetime.now().isoformat(timespec="seconds")
+            if conn.execute("SELECT 1 FROM hanzi WHERE hanzi=?", (char,)).fetchone():
+                conn.execute(
+                    "UPDATE hanzi SET myanmar=?, source='curated', updated_at=? WHERE hanzi=?",
+                    (myanmar, now, char))
+            else:
+                conn.execute(
+                    "INSERT INTO hanzi (hanzi, myanmar, source, updated_at) "
+                    "VALUES (?,?,'curated',?)", (char, myanmar, now))
+            if self._word_id:
+                conn.execute(
+                    "UPDATE word_chars SET myanmar=? WHERE word_id=? AND hanzi=?",
+                    (myanmar, self._word_id, char))
+            conn.commit()
+        finally:
+            conn.close()
+        self._sources[char] = "curated"
+        self._reload()
+
+    # -- UI -------------------------------------------------------------
+
+    def _populate(self):
+        while self.cards_layout.count() > 1:  # keep the trailing stretch
+            item = self.cards_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        if not self._rows:
+            empty = QLabel("—\nNo character breakdown for this word.", objectName="mutedValue")
+            empty.setWordWrap(True)
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.cards_layout.insertWidget(0, empty)
+            return
+        insert_at = 0
+        grouped = {}
+        for row in self._rows:
+            grouped.setdefault(row[0], []).append(row[1:])
+        for entry in self._entries:
+            group = grouped.get(entry["entry_index"])
+            if not group:
+                continue
+            label = QLabel("%s" % entry["display"], objectName="entryLabel")
+            label.setWordWrap(True)
+            self.cards_layout.insertWidget(insert_at, label)
+            insert_at += 1
+            for position, hanzi, pinyin, english, myanmar, note in group:
+                self.cards_layout.insertWidget(insert_at, self._build_card(
+                    entry["entry_index"], position, hanzi, pinyin, english, myanmar, note))
+                insert_at += 1
+
+    def _build_card(self, entry_index, position, hanzi, pinyin, english, myanmar, note):
+        card = QFrame(objectName="charCard")
+        grid = QGridLayout(card)
+        grid.setContentsMargins(14, 10, 14, 12)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(4)
+
+        hanzi_label = QLabel(hanzi, objectName="charHanzi")
+        grid.addWidget(hanzi_label, 0, 0, 2, 1)
+
+        pinyin_label = QLabel(pinyin or "—", objectName="charPinyin")
+        grid.addWidget(pinyin_label, 0, 1)
+        english_label = QLabel(english or "—",
+                               objectName="charEnglish" if english else "mutedValue")
+        english_label.setWordWrap(True)
+        grid.addWidget(english_label, 0, 2)
+        myanmar_label = QLabel(myanmar or "—",
+                               objectName="charMyanmar" if myanmar else "mutedValue")
+        myanmar_label.setWordWrap(True)
+        grid.addWidget(myanmar_label, 1, 2)
+
+        chips = QHBoxLayout()
+        chips.setSpacing(6)
+        editable = len(hanzi) <= 1  # whole-mode cards repeat words.myanmar
+        if note:
+            note_label = QLabel(note, objectName="charNote")
+            note_label.setWordWrap(True)
+            chips.addWidget(note_label)
+        source = self._sources.get(hanzi, "")
+        if editable:
+            chip = QLabel("curated" if source == "curated" else "auto",
+                          objectName="curatedChip" if source == "curated" else "autoChip")
+            chips.addWidget(chip)
+        chips.addStretch(1)
+        if editable:
+            edit_btn = QPushButton("✎", objectName="softButton")
+            edit_btn.setFixedWidth(40)
+            edit_btn.setToolTip("Fix the Myanmar meaning of this character")
+            edit_btn.clicked.connect(
+                lambda _=False, ch=hanzi, current=myanmar: self._open_editor(card, ch, current))
+            chips.addWidget(edit_btn)
+        grid.addLayout(chips, 2, 0, 1, 3)
+        card._editor = None
+        return card
+
+    def _open_editor(self, card, char, current):
+        """Inline editor for the Myanmar gloss of one character."""
+        if getattr(card, "_editor", None) is not None:
+            card._editor.setVisible(not card._editor.isVisible())
+            return
+        editor = QWidget()
+        row = QHBoxLayout(editor)
+        row.setContentsMargins(0, 2, 0, 0)
+        row.setSpacing(6)
+        field = QLineEdit(current)
+        field.setPlaceholderText("မြန်မာ အဓိပ္ပာယ် ရေးပါ…")
+        save_btn = QPushButton("Save", objectName="accentButton")
+        cancel_btn = QPushButton("Cancel", objectName="softButton")
+        row.addWidget(field, 1)
+        row.addWidget(save_btn)
+        row.addWidget(cancel_btn)
+
+        def commit():
+            self._save_gloss(char, field.text())
+
+        def discard():
+            editor.setVisible(False)
+
+        save_btn.clicked.connect(commit)
+        cancel_btn.clicked.connect(discard)
+        field.returnPressed.connect(commit)
+        card._editor = editor
+        card.layout().addWidget(editor, 3, 0, 1, 3)
+        field.setFocus()
+
+
 class VocabApp(QMainWindow):
     tree_columns = ("id", "english", "chinese", "category", "myanmar", "sound")
 
@@ -866,7 +1438,7 @@ class VocabApp(QMainWindow):
         self.word_count_label = QLabel("0 words")
         self.word_count_label.setObjectName("chipLabel")
 
-        self.status_label = QLabel("Ready")
+        self.status_label = QLabel("Ready — tap the Chinese column to see the character breakdown")
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -947,7 +1519,20 @@ class VocabApp(QMainWindow):
         eng_row.addWidget(self.ent_eng, 1)
         eng_row.addWidget(self.eng_sound_btn)
         form.addWidget(eng_holder, 1, 0)
-        for col, widget in enumerate((self.ent_mm, self.ent_cn, self.combo_cat), start=1):
+        # The Chinese field gets a 字 button that previews the per-character
+        # breakdown before the word is even saved.
+        self.cn_breakdown_btn = QPushButton("字", objectName="softButton")
+        self.cn_breakdown_btn.setFixedWidth(44)
+        self.cn_breakdown_btn.setToolTip("Preview the character breakdown (စာလုံးလိုက် အဓိပ္ပာယ်)")
+        self.cn_breakdown_btn.clicked.connect(self.preview_cn_breakdown)
+        cn_holder = QWidget()
+        cn_row = QHBoxLayout(cn_holder)
+        cn_row.setContentsMargins(0, 0, 0, 0)
+        cn_row.setSpacing(6)
+        cn_row.addWidget(self.ent_cn, 1)
+        cn_row.addWidget(self.cn_breakdown_btn)
+        form.addWidget(cn_holder, 1, 2)
+        for col, widget in ((1, self.ent_mm), (3, self.combo_cat)):
             form.addWidget(widget, 1, col)
         form.setColumnStretch(0, 3)
         form.setColumnStretch(1, 3)
@@ -1336,12 +1921,57 @@ class VocabApp(QMainWindow):
             self.play_sound_btn.setToolTip("Playback unavailable — PySide6.QtMultimedia is missing")
 
     def _on_item_clicked(self, item, column):
-        """Clicking the Sound column cell plays that word's pronunciation."""
-        if column != 5 or item is None or self._item_word_id(item) is None:
+        """Column 5 (Sound) plays the pronunciation; column 2 (Chinese) opens
+        the per-character breakdown dialog."""
+        if item is None or self._item_word_id(item) is None:
             return
-        self.tree.clearSelection()
-        item.setSelected(True)
-        self.play_selected_sound()
+        if column == 5:
+            self.tree.clearSelection()
+            item.setSelected(True)
+            self.play_selected_sound()
+        elif column == 2:
+            # A double-click on the same cell opens the editor; ignore the
+            # second click of that gesture so the dialog does not reopen.
+            now = time.monotonic()
+            if now - getattr(self, "_breakdown_opened_at", 0.0) < 0.6:
+                return
+            self._breakdown_opened_at = now
+            self.tree.clearSelection()
+            item.setSelected(True)
+            self.show_chinese_breakdown(self._item_word_id(item))
+
+    def show_chinese_breakdown(self, word_id):
+        """Open the character-by-character view for one library word."""
+        data = load_word_breakdown(word_id)
+        if not data:
+            self.status_label.setText("This word has no Chinese text to break down")
+            return
+        chinese, myanmar, mode, entries, rows = data
+        ChineseBreakdownDialog(self, chinese, myanmar, mode, entries, rows,
+                               word_id=word_id).exec()
+
+    def preview_cn_breakdown(self):
+        """Preview the breakdown of the Chinese entry being typed (no save).
+
+        Uses the in-memory parser + shared hanzi dictionary; nothing is
+        written to the database."""
+        cn = normalize_chinese_entry(normalize_myanmar_text(self.ent_cn.text()))
+        if not cn or not _HANZI_RE.search(cn):
+            self.status_label.setText("Type a Chinese entry first to preview its breakdown")
+            return
+        entries = split_chinese_entries(cn)
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            glosses = _hanzi_glosses(conn)
+        finally:
+            conn.close()
+        rows = []
+        for entry in entries:
+            chars = _HANZI_RE.findall(entry["core"])
+            whole = len(chars) > 1 and any(ch not in glosses for ch in chars)
+            for row in _entry_rows(entry, glosses, whole):
+                rows.append((entry["entry_index"],) + row)
+        ChineseBreakdownDialog(self, cn, "", "auto", entries, rows, word_id=None).exec()
 
     def play_selected_sound(self):
         """Play the stored MP3 for the selected list row (Ctrl+P)."""
@@ -1468,6 +2098,7 @@ class VocabApp(QMainWindow):
                     "INSERT INTO words (english, chinese, myanmar, category) VALUES (?,?,?,?)",
                     (eng, cn, mm, cat),
                 ).lastrowid
+                rebuild_word_chars(conn, [word_id])
                 conn.commit()
             finally:
                 conn.close()
@@ -1494,6 +2125,7 @@ class VocabApp(QMainWindow):
             return
         conn = sqlite3.connect(DB_FILE)
         conn.execute("UPDATE words SET chinese=? WHERE id=?", (cn, word_id))
+        rebuild_word_chars(conn, [word_id])
         conn.commit()
         conn.close()
         self.ent_cn.clear()
@@ -1529,6 +2161,7 @@ class VocabApp(QMainWindow):
                     "UPDATE words SET english=?, chinese=?, myanmar=?, category=? WHERE id=?",
                     (eng, cn, mm, cat, word_id),
                 )
+                rebuild_word_chars(conn, [word_id])
                 conn.commit()
             finally:
                 conn.close()

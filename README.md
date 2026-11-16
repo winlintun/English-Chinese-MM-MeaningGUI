@@ -15,6 +15,13 @@ VocApp is a small desktop vocabulary manager built with Python and PySide6 (Qt).
   when a word is saved (existing words are backfilled at startup) and stored
   inside `vocabulary.db`, so they replay offline. Play them with the
   🔊 buttons in the word list / editor or with `Ctrl+P`.
+- Chinese character breakdown: tap the **Chinese** column (or the 字 button in
+  the editor) to see the meaning of each character next to the meaning of the
+  whole word — e.g. 成績 (chéngjì) → 成 (chéng) "to complete" → ပြည့်စုံသော … +
+  績 (jì) "achievement" → အောင်မြင်မှု. Words that should not be split
+  (transliterations, erhua like 藏貓兒) are kept whole; the dialog's
+  "Show as one word" toggle remembers that choice per word. Myanmar meanings
+  can be fixed per character right in the dialog.
 
 ## Requirements
 
@@ -115,15 +122,56 @@ launch the app copies the bundled Myanmar fonts and the bundled
 `vocabulary.db` (with already-downloaded sounds) into its private storage, so
 it starts with the full vocabulary and plays sounds offline.
 
+## The Chinese Character Breakdown (build-time data)
+
+The per-character data (pinyin, English glosses, Myanmar glosses) is precomputed
+on the desktop and stored inside `vocabulary.db` (tables `hanzi` and
+`word_chars`), so the Android app works fully offline. To regenerate it:
+
+```bash
+# 1. Download CC-CEDICT once (about 5 MB)
+curl -L -o cedict.txt.gz \
+  "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz"
+gunzip cedict.txt.gz
+
+# 2. Import the dictionary + curated glosses and rebuild the breakdown rows
+python3 build_chinese_breakdown.py --cedict cedict.txt
+
+# 3. Optional: auto-suggest Myanmar glosses via MyOrdbok for the most frequent
+#    characters (online, ~1 s per character). Results are marked "auto" in the
+#    UI until reviewed.
+python3 build_chinese_breakdown.py --suggest-mdbg --suggest-limit 300
+
+# 4. Only recompute the breakdown rows (after editing data/hanzi_myanmar.csv)
+python3 build_chinese_breakdown.py --rebuild-only
+```
+
+- `data/hanzi_myanmar.csv` (`hanzi,pinyin,myanmar,reading_note`) holds the
+  human-curated Myanmar glosses; curated rows are never overwritten by
+  generated data. `reading_note` marks special cases such as
+  `erhua — နောက်ဆက် "-r" အသံ`.
+- Words that must not be split can be fixed permanently with
+  `--whole-word "english text"` (repeatable), or per word in the dialog.
+- After curation, rebuild the APK so the phone ships with the fresh database.
+
+### CC-CEDICT attribution
+
+English per-character glosses are derived from
+[CC-CEDICT](https://www.mdbg.net/chinese/dictionary), edited by MDBG,
+licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
+Myanmar glosses are original content of this project.
+
 ## Project Files
 
 ```text
-vocapp.py          Main PySide6 application
-main.py            Android entry point (pyside6-android-deploy)
-VocabApp.spec      PyInstaller build configuration
-requirements.txt   Python package requirements
-fonts/             Optional Myanmar font files
-vocabulary.db      Local database created at runtime
+vocapp.py                     Main PySide6 application
+main.py                       Android entry point (pyside6-android-deploy)
+build_chinese_breakdown.py    Desktop generator for the per-character data
+data/hanzi_myanmar.csv        Curated Myanmar glosses per character
+VocabApp.spec                 PyInstaller build configuration
+requirements.txt              Python package requirements
+fonts/                        Optional Myanmar font files
+vocabulary.db                 Local database created at runtime
 ```
 
 ## Notes

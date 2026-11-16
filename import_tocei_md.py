@@ -135,7 +135,17 @@ def import_folder(md_folder, db_file):
         print(f"{name}  [category: {category}]  added={added}  skipped(existing)={skipped}")
 
     con.commit()
+
+    # keep the per-character breakdown in sync with newly imported words
+    import vocapp  # local import: only needed when new rows were added
+    vocapp._migrate_chinese_chars(con)
+    con.commit()
+    rebuilt = vocapp.rebuild_word_chars(con)
+    con.commit()
     con.close()
+    if rebuilt:
+        print(f"Rebuilt the character breakdown for {rebuilt} word(s)")
+
     print(f"\nDone. New words added: {total_new}, already in DB (skipped): {total_skip}")
 
 

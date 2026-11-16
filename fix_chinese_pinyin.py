@@ -43,10 +43,18 @@ def fix_database(db_file):
                 samples.append((cn, fixed))
 
     con.commit()
+
+    # keep the per-character breakdown in sync with the normalized text
+    vocapp._migrate_chinese_chars(con)
+    con.commit()
+    rebuilt = vocapp.rebuild_word_chars(con)
+    con.commit()
     con.close()
 
     print(f"Checked {len(rows)} Chinese entries")
     print(f"Updated {updated} row(s) to Traditional Chinese + pinyin")
+    if rebuilt:
+        print(f"Rebuilt the character breakdown for {rebuilt} word(s)")
     for old, new in samples:
         print(f"  {old!r} -> {new!r}")
     if updated == 0:
