@@ -35,11 +35,9 @@ except ImportError:  # playback disabled — buttons show a hint instead
 # _MEIPASS folder, but the database must stay next to the executable so it
 # survives restarts.
 BUNDLE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-# On Android the packaged app directory is read-only; the entry point
-# (main.py) seeds VOCAPP_DATA_DIR with the writable app-data location.
 DATA_DIR = os.environ.get("VOCAPP_DATA_DIR") or BUNDLE_DIR
-# Fonts ship in the bundle on desktop and are copied into the writable
-# data dir on Android, so check both.
+# Fonts ship in the bundle next to the executable; VOCAPP_DATA_DIR may point
+# at a separate data dir, so check both.
 _font_dirs = [os.path.join(BUNDLE_DIR, "fonts"), os.path.join(DATA_DIR, "fonts")]
 FONT_DIR = next((p for p in _font_dirs if os.path.isdir(p)), _font_dirs[0])
 DB_FILE = os.path.join(DATA_DIR, "vocabulary.db")
@@ -401,16 +399,21 @@ def rebuild_word_chars(conn, word_ids=None):
         morphemes whose characters are unknown stay whole).
 
     Idempotent: a word's rows are replaced only when they actually changed.
+    word_ids=None rebuilds every word; an empty list rebuilds nothing.
     Returns the number of words whose rows were rewritten."""
     glosses = _hanzi_glosses(conn)
-    if word_ids:
-        words = conn.execute(
-            "SELECT id, chinese, breakdown_mode FROM words WHERE id IN (%s)"
-            % ",".join("?" * len(word_ids)), list(word_ids)).fetchall()
-    else:
+    if word_ids is None:
         words = conn.execute(
             "SELECT id, chinese, breakdown_mode FROM words "
             "WHERE chinese IS NOT NULL AND chinese != ''").fetchall()
+    else:
+        words = []
+        # Chunk to stay under SQLITE_MAX_VARIABLE_NUMBER (999 on older builds).
+        for start in range(0, len(word_ids), 500):
+            chunk = word_ids[start:start + 500]
+            words.extend(conn.execute(
+                "SELECT id, chinese, breakdown_mode FROM words WHERE id IN (%s)"
+                % ",".join("?" * len(chunk)), chunk).fetchall())
     changed = 0
     for word_id, chinese, mode in words:
         computed = []
@@ -664,7 +667,11 @@ def store_sound(word_id, data):
         conn.close()
 
 
-def init_db():
+def init_db(backup=True):
+    """Create/migrate the database.
+
+    backup=False skips the rolling-backup refresh — the data generators
+    call init_db() on scratch DBs and must not overwrite the real backup."""
     _harden_db_permissions()
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
@@ -691,9 +698,11 @@ def init_db():
     _migrate_chinese_text(conn)
     _migrate_sound_column(conn)
     _migrate_chinese_chars(conn)
+    _migrate_word_chars_maintenance(conn)
     conn.commit()
     conn.close()
-    backup_database_if_changed()
+    if backup:
+        backup_database_if_changed()
 
 
 def _harden_db_permissions():
@@ -749,22 +758,26 @@ def backup_database_if_changed():
     last backup. If nothing changed, the backup is left untouched."""
     try:
         conn = sqlite3.connect(DB_FILE)
-        fingerprint = _db_data_fingerprint(conn)
-        if os.path.exists(BACKUP_HASH_FILE):
-            with open(BACKUP_HASH_FILE, "r", encoding="utf-8") as handle:
-                stored = handle.read().strip()
-            if stored == fingerprint:
-                conn.close()
-                print("Database unchanged — backup is up to date")
-                return False
-        # SQLite's backup API copies a consistent snapshot (WAL-safe).
-        with sqlite3.connect(BACKUP_FILE) as destination:
-            conn.backup(destination)
-        with open(BACKUP_HASH_FILE, "w", encoding="utf-8") as handle:
-            handle.write(fingerprint)
-        conn.close()
-        print("Database changed — backup updated")
-        return True
+        try:
+            fingerprint = _db_data_fingerprint(conn)
+            if os.path.exists(BACKUP_HASH_FILE):
+                with open(BACKUP_HASH_FILE, "r", encoding="utf-8") as handle:
+                    stored = handle.read().strip()
+                if stored == fingerprint:
+                    print("Database unchanged — backup is up to date")
+                    return False
+            # SQLite's backup API copies a consistent snapshot (WAL-safe).
+            destination = sqlite3.connect(BACKUP_FILE)
+            try:
+                conn.backup(destination)
+            finally:
+                destination.close()  # commit alone leaves -wal/-shm behind
+            with open(BACKUP_HASH_FILE, "w", encoding="utf-8") as handle:
+                handle.write(fingerprint)
+            print("Database changed — backup updated")
+            return True
+        finally:
+            conn.close()
     except Exception as exc:
         print("Backup skipped (%s)" % exc)
         return False
@@ -872,6 +885,41 @@ def _migrate_chinese_chars(conn):
         conn.execute("ALTER TABLE words ADD COLUMN breakdown_mode TEXT DEFAULT 'auto'")
     conn.execute("PRAGMA user_version=4")
     print("Added hanzi/word_chars tables and breakdown_mode column")
+
+
+def _migrate_word_chars_maintenance(conn):
+    """Version 5: one-time maintenance for the breakdown tables.
+
+    Adds idx_word_chars_hanzi (used by _save_gloss's snapshot patch) and
+    removes word_chars rows orphaned before delete_word learned to clean
+    up (PRAGMA foreign_keys is off, so ON DELETE CASCADE never fired)."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    # Repair: a restored/partial DB may claim any version without the
+    # tables (or words.breakdown_mode) actually present. Reset the version
+    # so _migrate_chinese_chars reruns and recreates them — skipping
+    # silently would leave the app broken forever ("no such table" in the
+    # backup fingerprint and the breakdown dialog).
+    missing = [name for name in ("hanzi", "word_chars") if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,)).fetchone()]
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(words)").fetchall()}
+    needs_repair = bool(missing) or "breakdown_mode" not in columns
+    if needs_repair:
+        if missing:
+            print("breakdown tables missing (%s) — recreating" % ", ".join(missing))
+        else:
+            print("words.breakdown_mode missing — recreating")
+        conn.execute("PRAGMA user_version=3")
+        _migrate_chinese_chars(conn)
+    elif version >= 5:
+        return
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_word_chars_hanzi ON word_chars(hanzi)")
+    conn.execute(
+        "DELETE FROM word_chars WHERE NOT EXISTS "
+        "(SELECT 1 FROM words WHERE words.id=word_chars.word_id)")
+    conn.execute("PRAGMA user_version=5")
+    print("Added idx_word_chars_hanzi, cleaned orphan word_chars rows")
 
 
 STYLESHEET = """
@@ -1271,24 +1319,56 @@ class ChineseBreakdownDialog(QDialog):
     def _save_gloss(self, char, myanmar):
         """Curate the Myanmar gloss of one character (source='curated')."""
         myanmar = normalize_myanmar_text(myanmar)
-        conn = sqlite3.connect(DB_FILE)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        busy = True
+        conn = None
         try:
-            now = datetime.datetime.now().isoformat(timespec="seconds")
-            if conn.execute("SELECT 1 FROM hanzi WHERE hanzi=?", (char,)).fetchone():
+            conn = sqlite3.connect(DB_FILE)
+            try:
+                now = datetime.datetime.now().isoformat(timespec="seconds")
+                if conn.execute("SELECT 1 FROM hanzi WHERE hanzi=?", (char,)).fetchone():
+                    conn.execute(
+                        "UPDATE hanzi SET myanmar=?, source='curated', updated_at=? WHERE hanzi=?",
+                        (myanmar, now, char))
+                else:
+                    conn.execute(
+                        "INSERT INTO hanzi (hanzi, myanmar, source, updated_at) "
+                        "VALUES (?,?,'curated',?)", (char, myanmar, now))
+                # Propagate the curated gloss. Fast path: word_chars snapshots
+                # only copy myanmar, so patch existing per-character rows
+                # directly (index-backed). Catch-up: auto-mode words that
+                # still have a multi-character snapshot row containing this
+                # character — an entry stored whole because the character
+                # was unknown. Split words are already covered by the
+                # UPDATE; words with no snapshot rows at all are computed on
+                # demand when first shown. instr() instead of LIKE so
+                # non-CJK characters ("A", "_", "%") match literally.
                 conn.execute(
-                    "UPDATE hanzi SET myanmar=?, source='curated', updated_at=? WHERE hanzi=?",
-                    (myanmar, now, char))
-            else:
-                conn.execute(
-                    "INSERT INTO hanzi (hanzi, myanmar, source, updated_at) "
-                    "VALUES (?,?,'curated',?)", (char, myanmar, now))
-            if self._word_id:
-                conn.execute(
-                    "UPDATE word_chars SET myanmar=? WHERE word_id=? AND hanzi=?",
-                    (myanmar, self._word_id, char))
-            conn.commit()
+                    "UPDATE word_chars SET myanmar=? WHERE hanzi=?", (myanmar, char))
+                ids = [row[0] for row in conn.execute(
+                    "SELECT id FROM words w WHERE w.breakdown_mode='auto' "
+                    "AND EXISTS (SELECT 1 FROM word_chars c WHERE c.word_id=w.id "
+                    "AND c.hanzi != ? AND instr(c.hanzi, ?) > 0)",
+                    (char, char))]
+                if self._word_id and self._word_id not in ids:
+                    ids.append(self._word_id)
+                if ids:
+                    rebuild_word_chars(conn, ids)
+                conn.commit()
+            finally:
+                conn.close()
+                conn = None
+        except sqlite3.Error as exc:
+            QApplication.restoreOverrideCursor()
+            busy = False
+            QMessageBox.critical(
+                self, "Save failed", f"Could not save the gloss:\n{exc}")
+            return
         finally:
-            conn.close()
+            if conn is not None:  # only if sqlite3.connect itself raised
+                conn.close()
+            if busy:  # skip when the except branch already restored it
+                QApplication.restoreOverrideCursor()
         self._sources[char] = "curated"
         self._reload()
 
@@ -2232,10 +2312,16 @@ class VocabApp(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         conn = sqlite3.connect(DB_FILE)
-        for word_id in ids:
-            conn.execute("DELETE FROM words WHERE id=?", (word_id,))
-        conn.commit()
-        conn.close()
+        try:
+            # foreign_keys is off, so the ON DELETE CASCADE never fires —
+            # delete the breakdown rows explicitly.
+            conn.executemany("DELETE FROM word_chars WHERE word_id=?",
+                             [(word_id,) for word_id in ids])
+            conn.executemany("DELETE FROM words WHERE id=?",
+                             [(word_id,) for word_id in ids])
+            conn.commit()
+        finally:
+            conn.close()
         self._refresh_filter_options()
         self.load_words()
         self.status_label.setText(f"Deleted {len(ids)} word(s)")

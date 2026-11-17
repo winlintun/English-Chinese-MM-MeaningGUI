@@ -27,7 +27,6 @@ import datetime
 import os
 import re
 import sqlite3
-import sys
 import time
 
 import vocapp
@@ -286,8 +285,18 @@ def main():
     args = parser.parse_args()
 
     conn = sqlite3.connect(args.db)
-    vocapp._migrate_chinese_chars(conn)
-    conn.commit()
+    # Full migration chain (1-5), not just the breakdown tables — a
+    # pre-versioned DB must not skip the Myanmar/Chinese migrations.
+    # init_db() works on vocapp.DB_FILE, so point it at --db (restoring
+    # the original afterwards so later backup paths stay consistent);
+    # backup=False stops it from refreshing the real rolling backup with
+    # this (possibly scratch) DB.
+    original_db = vocapp.DB_FILE
+    vocapp.DB_FILE = args.db
+    try:
+        vocapp.init_db(backup=False)
+    finally:
+        vocapp.DB_FILE = original_db
     try:
         for english in args.whole_word:
             n = conn.execute(

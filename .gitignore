@@ -1,12 +1,3 @@
-# Built APK / build artifacts
-*.apk
-*.aab
-bin/
-.buildozer/
-deployment/
-android_wheels/
-pysidedeploy.spec
-
 # Python
 __pycache__/
 *.py[cod]
@@ -25,8 +16,13 @@ venv/
 # Database (user data, changes constantly)
 !*.db
 *.db-sha256
+*.db-wal
+*.db-shm
 vocabulary_backup.db
 vocabulary_backup.db.sha256
+
+# Machine-local tool settings
+.qoder/
 
 # Generated exports
 export_data/*.pdf

@@ -2,6 +2,10 @@
 
 Source request: [feature.md](feature.md). Created 2026-11-16.
 
+> Historical spec. Written before the Android port was removed; references to
+> `main.py`, APK builds, and "ship the DB in the APK" are outdated — the app
+> is desktop-only now. Current behavior: see `AGENTS.md`.
+
 ## 1. What the feature asks for
 
 For a Chinese entry, break it into individual characters and show the meaning of each

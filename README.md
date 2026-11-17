@@ -72,7 +72,7 @@ On first launch, the application creates the `words` table in the SQLite databas
 
 ## Database Location
 
-`vocabulary.db` lives next to `vocapp.py` (or next to the executable in a PyInstaller build). It is created automatically on first start, so there is nothing to configure. The file is not ignored by Git, because it holds your own vocabulary — do not commit it if you publish the project.
+`vocabulary.db` lives next to `vocapp.py` (or next to the executable in a PyInstaller build). It is created automatically on first start, so there is nothing to configure. This project commits the database to Git on purpose — it holds your curated vocabulary; commit a checkpointed copy (quit the app first so `-wal` transactions are folded in).
 
 ## Myanmar Fonts
 
@@ -84,49 +84,16 @@ Install PyInstaller in the active environment if needed:
 
 ```powershell
 python -m pip install pyinstaller
-pyinstaller --onefile --windowed --name VocabApp vocapp.py
+pyinstaller --onefile --windowed --name VocabApp --add-data "fonts;fonts" vocapp.py
 ```
 
-Build using the included spec file:
-
-```powershell
-pyinstaller VocabApp.spec
-```
-
-The executable is created in the `dist` directory. Build with `--add-data "fonts;fonts"` (or `datas = [("fonts", "fonts")]` in the spec) so the Myanmar fallback font is bundled; `vocapp.py` reads it from `sys._MEIPASS` and keeps `vocabulary.db` beside the executable.
-
-## Build an Android APK
-
-Requires Linux (or macOS) and JDK 17+. One-time setup downloads the Android
-NDK/SDK automatically (~3 GB into `~/.pyside6_android_deploy`):
-
-```bash
-# 1. Android build prerequisites (into the active environment)
-pip install -r .env/lib/python3.12/site-packages/PySide6/scripts/requirements-android.txt
-
-# 2. Official PySide6 Android wheels (public Qt archive, ~86 MB)
-curl -L -o android_wheels/pyside6-android_aarch64.whl \
-  https://download.qt.io/official_releases/QtForPython/pyside6/pyside6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl
-curl -L -o android_wheels/shiboken6-android_aarch64.whl \
-  https://download.qt.io/official_releases/QtForPython/shiboken6/shiboken6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl
-
-# 3. Build the APK (entry point is main.py)
-pyside6-android-deploy --name=VocApp \
-  --wheel-pyside=android_wheels/pyside6-android_aarch64.whl \
-  --wheel-shiboken=android_wheels/shiboken6-android_aarch64.whl
-```
-
-The APK is written next to the project (`buildozer/bin/` or `build/`). Install it
-on the phone by sideloading (`adb install <file>.apk` or copy + open). On first
-launch the app copies the bundled Myanmar fonts and the bundled
-`vocabulary.db` (with already-downloaded sounds) into its private storage, so
-it starts with the full vocabulary and plays sounds offline.
+No spec file is tracked in the repo — build directly with the command above (add more `--add-data` entries as needed). The executable is created in the `dist` directory; `vocapp.py` reads the bundled Myanmar font from `sys._MEIPASS` and keeps `vocabulary.db` beside the executable.
 
 ## The Chinese Character Breakdown (build-time data)
 
 The per-character data (pinyin, English glosses, Myanmar glosses) is precomputed
-on the desktop and stored inside `vocabulary.db` (tables `hanzi` and
-`word_chars`), so the Android app works fully offline. To regenerate it:
+and stored inside `vocabulary.db` (tables `hanzi` and `word_chars`). To
+regenerate it:
 
 ```bash
 # 1. Download CC-CEDICT once (about 5 MB)
@@ -152,7 +119,6 @@ python3 build_chinese_breakdown.py --rebuild-only
   `erhua — နောက်ဆက် "-r" အသံ`.
 - Words that must not be split can be fixed permanently with
   `--whole-word "english text"` (repeatable), or per word in the dialog.
-- After curation, rebuild the APK so the phone ships with the fresh database.
 
 ### CC-CEDICT attribution
 
@@ -165,10 +131,8 @@ Myanmar glosses are original content of this project.
 
 ```text
 vocapp.py                     Main PySide6 application
-main.py                       Android entry point (pyside6-android-deploy)
-build_chinese_breakdown.py    Desktop generator for the per-character data
+build_chinese_breakdown.py    Generator for the per-character data
 data/hanzi_myanmar.csv        Curated Myanmar glosses per character
-VocabApp.spec                 PyInstaller build configuration
 requirements.txt              Python package requirements
 fonts/                        Optional Myanmar font files
 vocabulary.db                 Local database created at runtime
