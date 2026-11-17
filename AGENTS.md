@@ -54,7 +54,7 @@ python vocapp.py                # desktop app
 - Lives next to `vocapp.py`; `VOCAPP_DATA_DIR` env overrides the path (useful for testing on a copy).
 - **The DB is committed to git on purpose** (`!*.db` in .gitignore) so curated data is versioned and shareable. The DB runs in WAL mode: **checkpoint before committing** — quit the app (or run `PRAGMA wal_checkpoint(TRUNCATE);`) so transactions sitting in `vocabulary.db-wal` are not lost from the commit.
 - Startup creates a rolling backup `vocabulary_backup.db`, refreshed only when `_db_data_fingerprint()` changes. **When adding data tables, extend the fingerprint** or curation changes won't trigger backups.
-- Schema changes are numbered `_migrate_*()` functions gated by `PRAGMA user_version` (currently 5). Add a new `_migrate_...`, bump the version, call it from `init_db()`; make it idempotent. No ORM — raw sqlite3 everywhere.
+- Schema changes are numbered `_migrate_*()` functions gated by `PRAGMA user_version` (currently 6). Add a new `_migrate_...`, bump the version, call it from `init_db()`; make it idempotent. No ORM — raw sqlite3 everywhere.
 
 ## Text conventions
 
@@ -64,7 +64,7 @@ python vocapp.py                # desktop app
 ## Chinese character breakdown (hanzi / word_chars tables)
 
 - Pipeline: `python3 build_chinese_breakdown.py --cedict cedict.txt` (CC-CEDICT, ~5 MB download) → fills `hanzi` dictionary + `word_chars` per-word rows. Idempotent.
-- **`data/hanzi_myanmar.csv` holds human-curated Myanmar glosses; generated data must never overwrite `source='curated'` rows.** Auto-suggested rows are `source='auto'` and visibly marked in the UI until reviewed.
+- **`data/hanzi_myanmar.csv` holds human-curated Myanmar glosses; generated data must never overwrite `source='curated'` rows.** Auto-suggested rows are `source='auto'` and visibly marked in the UI until reviewed. A `myanmar` cell of `-` in the CSV is a tombstone (`source='tombstone'`: intentional no-gloss, blocks auto-suggestion, sticky in the DB); a note-only row (empty gloss + `reading_note`) is `source='note'` and never wipes an existing gloss or pinyin. Duplicate CSV rows: LAST NON-EMPTY row wins. `--report-myanmar [--report-limit N]` prints the coverage report (missing-but-visible / auto glosses to review / most frequent missing) after applying CSV edits.
 - Split rule: a wrong split is worse than no split — split a word only when every character exists in the `hanzi` table; transliterations/proper nouns stay whole via `words.breakdown_mode='whole'` (dialog toggle or `--whole-word`).
 - `word_chars` snapshots pinyin/english/myanmar/note per word. Curating a gloss in the dialog (`_save_gloss`) updates `hanzi`, directly patches existing `word_chars` snapshots, and rebuilds only auto-mode words that were whole because the character was unknown. Bulk edits: run `python3 build_chinese_breakdown.py --rebuild-only`.
 - Keep the `pypinyin`/`opencc` imports guarded inside `_generate_pinyin` / `_simplified_to_traditional`

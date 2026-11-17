@@ -117,6 +117,19 @@ python3 build_chinese_breakdown.py --rebuild-only
   human-curated Myanmar glosses; curated rows are never overwritten by
   generated data. `reading_note` marks special cases such as
   `erhua — နောက်ဆက် "-r" အသံ`.
+- Special `myanmar` cells in the CSV:
+  - `-` — tombstone: the character is intentionally gloss-less. It clears
+    the gloss, blocks auto-suggestion, and is sticky (deleting the CSV row
+    does not restore auto-suggestion; add a real gloss row to undo).
+  - empty with a `reading_note` — note-only row: never wipes an existing
+    gloss or pinyin; the character stays eligible for auto-suggestion.
+  - duplicate rows: the LAST NON-EMPTY row wins (a row with an empty
+    gloss AND an empty note is ignored; use `-` to clear a gloss).
+- `python3 build_chinese_breakdown.py --report-myanmar [--report-limit N]`
+  prints the Myanmar-gloss coverage report: [1] missing-but-visible
+  characters ranked by usage, [2] auto glosses awaiting review, [3] most
+  frequent missing characters. It first applies CSV edits and refreshes
+  snapshots, so it always reflects the current curated file.
 - Words that must not be split can be fixed permanently with
   `--whole-word "english text"` (repeatable), or per word in the dialog.
 

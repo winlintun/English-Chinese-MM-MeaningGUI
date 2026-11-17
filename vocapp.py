@@ -699,6 +699,7 @@ def init_db(backup=True):
     _migrate_sound_column(conn)
     _migrate_chinese_chars(conn)
     _migrate_word_chars_maintenance(conn)
+    _migrate_hanzi_sources(conn)
     conn.commit()
     conn.close()
     if backup:
@@ -922,6 +923,25 @@ def _migrate_word_chars_maintenance(conn):
     print("Added idx_word_chars_hanzi, cleaned orphan word_chars rows")
 
 
+def _migrate_hanzi_sources(conn):
+    """Version 6: normalize legacy hanzi source values.
+
+    Rows left by the old _save_gloss/load_curated as source='curated'
+    with an EMPTY gloss are ambiguous: the old dialog wrote one on a
+    plain Enter, so they are not necessarily a deliberate "no gloss"
+    decision. Re-classify them ALL as 'note' — never auto-suggest-
+    skipped and still fillable by library seeding — so the heuristic is
+    reversible: add a real gloss row or a "-" tombstone to finalize."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version >= 6:
+        return
+    changed = conn.execute(
+        "UPDATE hanzi SET source='note' "
+        "WHERE source='curated' AND COALESCE(myanmar,'')=''").rowcount
+    conn.execute("PRAGMA user_version=6")
+    print("Re-classified %d curated-but-empty hanzi row(s) as 'note'" % changed)
+
+
 STYLESHEET = """
 QMainWindow, QDialog, #quizBody { background: %(bg)s; }
 
@@ -1068,6 +1088,14 @@ QHeaderView::section:hover { background: %(soft_hover)s; }
 #curatedChip {
     background: %(selected)s;
     color: %(accent_dark)s;
+    border-radius: 8px;
+    padding: 2px 10px;
+    font-size: 8pt;
+}
+#blankChip {
+    background: transparent;
+    color: %(muted)s;
+    border: 1px dashed %(border)s;
     border-radius: 8px;
     padding: 2px 10px;
     font-size: 8pt;
@@ -1317,8 +1345,16 @@ class ChineseBreakdownDialog(QDialog):
         self._reload()
 
     def _save_gloss(self, char, myanmar):
-        """Curate the Myanmar gloss of one character (source='curated')."""
+        """Curate the Myanmar gloss of one character.
+
+        A gloss becomes source='curated'; an empty or "-" save means
+        "explicitly no gloss" and writes source='tombstone' (blocks
+        auto-suggestion, shows a "no gloss" chip). A tombstone for a
+        character missing from the dictionary persists nothing and shows
+        an info message instead."""
         myanmar = normalize_myanmar_text(myanmar)
+        if myanmar == "-":
+            myanmar = ""
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         busy = True
         conn = None
@@ -1326,34 +1362,49 @@ class ChineseBreakdownDialog(QDialog):
             conn = sqlite3.connect(DB_FILE)
             try:
                 now = datetime.datetime.now().isoformat(timespec="seconds")
-                if conn.execute("SELECT 1 FROM hanzi WHERE hanzi=?", (char,)).fetchone():
+                # An empty save is the dialog's tombstone: "no gloss".
+                gloss_source = "curated" if myanmar else "tombstone"
+                exists = conn.execute(
+                    "SELECT 1 FROM hanzi WHERE hanzi=?", (char,)).fetchone()
+                if not exists and gloss_source == "tombstone":
+                    # A tombstone for a character unknown to the dictionary
+                    # has nothing to block (auto-suggestion only targets
+                    # existing rows), and inserting a row would wrongly make
+                    # the unknown character count as "known" for word
+                    # splitting — persist nothing.
+                    persist = False
+                elif exists:
+                    persist = True
                     conn.execute(
-                        "UPDATE hanzi SET myanmar=?, source='curated', updated_at=? WHERE hanzi=?",
-                        (myanmar, now, char))
+                        "UPDATE hanzi SET myanmar=?, source=?, updated_at=? WHERE hanzi=?",
+                        (myanmar, gloss_source, now, char))
                 else:
+                    persist = True
                     conn.execute(
                         "INSERT INTO hanzi (hanzi, myanmar, source, updated_at) "
-                        "VALUES (?,?,'curated',?)", (char, myanmar, now))
-                # Propagate the curated gloss. Fast path: word_chars snapshots
-                # only copy myanmar, so patch existing per-character rows
-                # directly (index-backed). Catch-up: auto-mode words that
-                # still have a multi-character snapshot row containing this
-                # character — an entry stored whole because the character
-                # was unknown. Split words are already covered by the
-                # UPDATE; words with no snapshot rows at all are computed on
-                # demand when first shown. instr() instead of LIKE so
-                # non-CJK characters ("A", "_", "%") match literally.
-                conn.execute(
-                    "UPDATE word_chars SET myanmar=? WHERE hanzi=?", (myanmar, char))
-                ids = [row[0] for row in conn.execute(
-                    "SELECT id FROM words w WHERE w.breakdown_mode='auto' "
-                    "AND EXISTS (SELECT 1 FROM word_chars c WHERE c.word_id=w.id "
-                    "AND c.hanzi != ? AND instr(c.hanzi, ?) > 0)",
-                    (char, char))]
-                if self._word_id and self._word_id not in ids:
-                    ids.append(self._word_id)
-                if ids:
-                    rebuild_word_chars(conn, ids)
+                        "VALUES (?,?,?,?)", (char, myanmar, gloss_source, now))
+                if persist:
+                    # Propagate the curated gloss. Fast path: word_chars
+                    # snapshots only copy myanmar, so patch existing
+                    # per-character rows directly (index-backed). Catch-up:
+                    # auto-mode words that still have a multi-character
+                    # snapshot row containing this character — an entry
+                    # stored whole because the character was unknown. Split
+                    # words are already covered by the UPDATE; words with
+                    # no snapshot rows at all are computed on demand when
+                    # first shown. instr() instead of LIKE so non-CJK
+                    # characters ("A", "_", "%") match literally.
+                    conn.execute(
+                        "UPDATE word_chars SET myanmar=? WHERE hanzi=?", (myanmar, char))
+                    ids = [row[0] for row in conn.execute(
+                        "SELECT id FROM words w WHERE w.breakdown_mode='auto' "
+                        "AND EXISTS (SELECT 1 FROM word_chars c WHERE c.word_id=w.id "
+                        "AND c.hanzi != ? AND instr(c.hanzi, ?) > 0)",
+                        (char, char))]
+                    if self._word_id and self._word_id not in ids:
+                        ids.append(self._word_id)
+                    if ids:
+                        rebuild_word_chars(conn, ids)
                 conn.commit()
             finally:
                 conn.close()
@@ -1369,7 +1420,15 @@ class ChineseBreakdownDialog(QDialog):
                 conn.close()
             if busy:  # skip when the except branch already restored it
                 QApplication.restoreOverrideCursor()
-        self._sources[char] = "curated"
+        if not persist:
+            # Nothing was written (see above) — say so instead of
+            # silently dropping the user's "no gloss" action.
+            QMessageBox.information(
+                self, "Nothing to change",
+                "%s is not in the character dictionary, so there is no "
+                "gloss to block — no change was saved." % char)
+            return
+        self._sources[char] = gloss_source
         self._reload()
 
     # -- UI -------------------------------------------------------------
@@ -1433,8 +1492,18 @@ class ChineseBreakdownDialog(QDialog):
             chips.addWidget(note_label)
         source = self._sources.get(hanzi, "")
         if editable:
-            chip = QLabel("curated" if source == "curated" else "auto",
-                          objectName="curatedChip" if source == "curated" else "autoChip")
+            if source == "curated":
+                chip = QLabel("curated", objectName="curatedChip")
+            elif source == "tombstone":
+                chip = QLabel("no gloss", objectName="blankChip")
+                chip.setToolTip("Intentionally blank — type a gloss and press "
+                                "Enter to restore one.")
+            elif source == "note" and not myanmar:
+                chip = QLabel("note", objectName="blankChip")
+                chip.setToolTip("Note-only row — still eligible for "
+                                "auto-suggestion.")
+            else:
+                chip = QLabel("auto", objectName="autoChip")
             chips.addWidget(chip)
         chips.addStretch(1)
         if editable:
@@ -1466,7 +1535,18 @@ class ChineseBreakdownDialog(QDialog):
         row.addWidget(cancel_btn)
 
         def commit():
-            self._save_gloss(char, field.text())
+            raw = normalize_myanmar_text(field.text())
+            if raw == "-":
+                self._save_gloss(char, "")  # explicit tombstone gesture
+                return
+            if raw == (current or "") and not raw:
+                # Unchanged EMPTY save — never writes an accidental
+                # tombstone on a gloss-less character.
+                discard()
+                return
+            # An unchanged non-empty save still lands here on purpose:
+            # it promotes an auto-suggested gloss to curated ("accept").
+            self._save_gloss(char, raw)
 
         def discard():
             editor.setVisible(False)
