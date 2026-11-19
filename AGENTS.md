@@ -46,6 +46,10 @@ python vocapp.py                # desktop app
 
 - No test suite. Verify with `python3 -m py_compile vocapp.py` + a headless smoke:
   `QT_QPA_PLATFORM=offscreen python3 -c "import vocapp; from PySide6.QtWidgets import QApplication; app=QApplication([]); vocapp.init_db(); vocapp.VocabApp()"`.
+- Linux desktop entry: `./install-desktop.sh` installs a menu entry + icon that
+  launches `vocapp.py` through the repo's `.env` virtualenv, so source changes
+  need no rebuild (only re-install the entry if the repo moves). Remove it with
+  `./install-desktop.sh --uninstall`.
 - `pyflakes vocapp.py` should stay clean (was used for past fix passes, see `report.md`).
 - `requirements.txt` is the full dependency list (PySide6, openpyxl, pypinyin, opencc-python-reimplemented — nothing else needed; online lookups use stdlib `urllib`).
 

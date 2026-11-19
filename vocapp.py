@@ -17,7 +17,7 @@ import urllib.parse
 import urllib.request
 
 from PySide6.QtCore import QMarginsF, QSizeF, Qt, QEvent, QObject, QTimer, QUrl, Signal
-from PySide6.QtGui import QFont, QFontDatabase, QKeySequence, QPageLayout, QPageSize, QPdfWriter, QShortcut, QTextDocument
+from PySide6.QtGui import QFont, QFontDatabase, QIcon, QKeySequence, QPageLayout, QPageSize, QPdfWriter, QShortcut, QTextDocument
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea,
@@ -36,7 +36,9 @@ except ImportError:  # playback disabled — buttons show a hint instead
 # _MEIPASS folder, but the database must stay next to the executable so it
 # survives restarts.
 BUNDLE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.environ.get("VOCAPP_DATA_DIR") or BUNDLE_DIR
+# Frozen builds keep the DB beside the executable, not in the _MEIPASS temp dir.
+_APP_HOME = os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, "frozen", False) else BUNDLE_DIR
+DATA_DIR = os.environ.get("VOCAPP_DATA_DIR") or _APP_HOME
 # Fonts ship in the bundle next to the executable; VOCAPP_DATA_DIR may point
 # at a separate data dir, so check both.
 _font_dirs = [os.path.join(BUNDLE_DIR, "fonts"), os.path.join(DATA_DIR, "fonts")]
@@ -2861,6 +2863,11 @@ def build_ui_font(myanmar_family):
 def main():
     init_db()
     app = QApplication(sys.argv)
+    app.setApplicationName("VocApp")
+    app.setDesktopFileName("vocapp")
+    icon_path = os.path.join(BUNDLE_DIR, "assets", "icon.png")
+    if os.path.isfile(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
     font_family = resolve_myanmar_font_family()
     app.setFont(build_ui_font(font_family))
     app.setStyleSheet(STYLESHEET)

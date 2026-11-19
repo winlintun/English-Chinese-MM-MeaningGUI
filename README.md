@@ -59,6 +59,33 @@ python vocapp.py
 
 On first launch, the application creates the `words` table in the SQLite database automatically.
 
+## Linux Desktop Shortcut
+
+Create the virtualenv first (the menu entry runs the app through it):
+
+```bash
+python3 -m venv .env
+.env/bin/python -m pip install -r requirements.txt
+```
+
+Then add VocApp to the applications menu (with its icon):
+
+```bash
+./install-desktop.sh
+```
+
+The menu entry starts `vocapp.py` from this repository using the local `.env`
+virtualenv. That means new features are available the next time you launch it
+after `git pull` or an edit — there is nothing to rebuild. Only re-run
+`.env/bin/python -m pip install -r requirements.txt` when `requirements.txt`
+changes, and re-run `./install-desktop.sh` if you move the repository.
+
+Remove the menu entry with:
+
+```bash
+./install-desktop.sh --uninstall
+```
+
 ## Using VocApp
 
 1. Enter English and Myanmar text. Chinese is optional.
@@ -84,10 +111,10 @@ Install PyInstaller in the active environment if needed:
 
 ```powershell
 python -m pip install pyinstaller
-pyinstaller --onefile --windowed --name VocabApp --add-data "fonts;fonts" vocapp.py
+pyinstaller --onefile --windowed --name VocabApp --add-data "fonts;fonts" --add-data "assets;assets" vocapp.py
 ```
 
-No spec file is tracked in the repo — build directly with the command above (add more `--add-data` entries as needed). The executable is created in the `dist` directory; `vocapp.py` reads the bundled Myanmar font from `sys._MEIPASS` and keeps `vocabulary.db` beside the executable.
+No spec file is tracked in the repo — build directly with the command above (add more `--add-data` entries as needed; on Linux/macOS use `:` instead of `;` as the separator). The executable is created in the `dist` directory; `vocapp.py` reads bundled fonts and the window icon from `sys._MEIPASS` and keeps `vocabulary.db` beside the executable.
 
 ## The Chinese Character Breakdown (build-time data)
 
@@ -162,8 +189,10 @@ Myanmar glosses are original content of this project.
 ```text
 vocapp.py                     Main PySide6 application
 build_chinese_breakdown.py    Generator for the per-character data
+install-desktop.sh            Linux applications-menu entry (install/uninstall)
 data/hanzi_myanmar.csv        Curated Myanmar glosses per character
 requirements.txt              Python package requirements
+assets/icon.png               Application icon
 fonts/                        Optional Myanmar font files
 vocabulary.db                 Local database created at runtime
 ```
