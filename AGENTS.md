@@ -78,7 +78,8 @@ python vocapp.py                # desktop app
 
 - MyOrdbok redesigned to client-side rendering: `lookup_myanmar()` reads the `og:description` meta tag. Ornagai API is Cloudflare-403 now. MDBG is used for Chinese.
 - **`ornagai.db` (optional local English→Myanmar dictionary, ~56 MB, gitignored):** when present next to `vocapp.py` (or `VOCAPP_ORNAGAI_DB`), `lookup_myanmar()` answers offline first and the pipeline's `--suggest-ornagai` fills glosses without network, replacing the noisy `--suggest-mdbg` path. `--resuggest` regenerates `source='auto'` rows; curated/tombstone rows are never touched. Both read the DB read-only (`entries.headword` → `senses.definition_my`).
-- Politeness delay 1 s between site hits (`SOUND_RETRY_DELAY`); pronunciation audio is fetched once and stored in the DB.
+- Parallel background downloads use `DOWNLOAD_WORKERS` (env `VOCAPP_SOUND_WORKERS`, default 4; gloss lookups use `LOOKUP_WORKERS` / `VOCAPP_LOOKUP_WORKERS`, default 2) through the daemon-thread `_parallel_run()` helper; `_pace_remote_request()` spaces request starts across those threads (`VOCAPP_SOUND_INTERVAL`, default 0.5 s) instead of sleeping per word. Each worker keeps its own cookie jar and warms the MyOrdbok definition page once. Pronunciation audio is fetched once and stored in the DB.
+- The search fallback (`search_ornagai`) also runs on a daemon worker (`_start_dictionary_search` is single-flight); results are discarded unless the token, term and category still match, so slow scans never block or overwrite newer searches.
 
 ## Spec docs
 

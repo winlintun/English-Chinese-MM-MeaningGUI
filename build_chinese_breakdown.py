@@ -31,7 +31,6 @@ import datetime
 import os
 import re
 import sqlite3
-import time
 
 import vocapp
 
@@ -581,25 +580,36 @@ def suggest_myanmar(conn, limit, cleared=()):
     targets = [(char, _translatable_candidates(english))
                for char, english in _suggestion_targets(conn, limit, cleared)]
     print("Suggesting Myanmar glosses for %d character(s)…" % len(targets))
-    done = failed = 0
-    for index, (char, candidates) in enumerate(targets, 1):
-        result = None
+
+    def lookup(target):
+        char, candidates = target
         for term in candidates:
+            vocapp._pace_remote_request()
             result = vocapp._lookup_myanmar_online(term)
             if result and any("\u1000" <= ch <= "\u109f" for ch in result):
-                break
-            result = None
-        if result:
-            conn.execute(
-                "UPDATE hanzi SET myanmar=?, source='auto', updated_at=? WHERE hanzi=?",
-                (vocapp.normalize_myanmar_text(result), _now(), char))
-            done += 1
-        else:
-            failed += 1
-        if index % 25 == 0:
-            conn.commit()
-            print("  %d/%d done (%d translated, %d missed)" % (index, len(targets), done, failed))
-        time.sleep(vocapp.SOUND_RETRY_DELAY)
+                return result
+        return None
+
+    done = failed = 0
+    if targets:
+        # Network lookups run in parallel (daemon threads); SQLite stays on
+        # this thread. Results arrive in completion order; each update is
+        # keyed by its own character.
+        workers = min(vocapp.LOOKUP_WORKERS, len(targets))
+        for index, ((char, _candidates), result) in enumerate(
+                vocapp._parallel_run(lookup, targets, workers), 1):
+            if result:
+                conn.execute(
+                    "UPDATE hanzi SET myanmar=?, source='auto', updated_at=? "
+                    "WHERE hanzi=?",
+                    (vocapp.normalize_myanmar_text(result), _now(), char))
+                done += 1
+            else:
+                failed += 1
+            if index % 25 == 0:
+                conn.commit()
+                print("  %d/%d done (%d translated, %d missed)"
+                      % (index, len(targets), done, failed))
     conn.commit()
     print("Suggestions finished: %d translated, %d missed" % (done, failed))
 

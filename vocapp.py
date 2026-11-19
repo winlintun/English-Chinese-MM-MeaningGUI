@@ -6,6 +6,7 @@ import http.cookiejar
 import json
 import os
 import pathlib
+import queue
 import re
 import sqlite3
 import sys
@@ -52,7 +53,20 @@ MYORDBOK_URL = "https://myordbok.com/definition?q="
 # page has been fetched (it sets session cookies first).
 SOUND_API_URL = "https://myordbok.com/api/speech"
 SOUND_REFERER = "https://myordbok.com/definition"
-SOUND_RETRY_DELAY = 1.0  # seconds between downloads — be polite to the site
+# Background downloads run in a small pool; the pacer below spaces their
+# request starts so the site is not hammered by the parallel workers.
+try:
+    DOWNLOAD_WORKERS = max(1, min(8, int(os.environ.get("VOCAPP_SOUND_WORKERS", "4"))))
+except ValueError:
+    DOWNLOAD_WORKERS = 4
+try:
+    DOWNLOAD_INTERVAL = max(0.0, float(os.environ.get("VOCAPP_SOUND_INTERVAL", "0.5")))
+except ValueError:
+    DOWNLOAD_INTERVAL = 0.5
+try:
+    LOOKUP_WORKERS = max(1, min(8, int(os.environ.get("VOCAPP_LOOKUP_WORKERS", "2"))))
+except ValueError:
+    LOOKUP_WORKERS = 2
 ORNAGAI_URL = "https://www.ornagai.com/index.php/api/word/?q="
 # Offline English→Myanmar dictionary (optional Ornagai export). When present
 # it answers lookups instantly and without network; the online services stay
@@ -636,6 +650,59 @@ def lookup_myanmar_local(term):
     return " ၊ ".join(fragments[:2]) or None
 
 
+def search_ornagai(term, limit=8):
+    """Dictionary matches for a search term: [(headword, definition), ...].
+
+    Exact headwords win, then index-friendly prefix matches, then a substring
+    scan. Used by the GUI when the library search finds nothing."""
+    term = (term or "").strip().lower()
+    if not term or not os.path.isfile(ORNAGAI_DB):
+        return []
+    try:
+        conn = sqlite3.connect(_sqlite_ro_uri(ORNAGAI_DB), uri=True, timeout=2)
+    except sqlite3.Error:
+        return []
+    try:
+        entries = []
+        for candidate in _word_variants(term):
+            entries = conn.execute(
+                "SELECT id, headword FROM entries WHERE headword_lc = ? "
+                "ORDER BY headword, id LIMIT ?",
+                (candidate, limit)).fetchall()
+            if entries:
+                break
+        if not entries:
+            # Range predicate keeps using idx_entries_hw (LIKE ... ESCAPE does not).
+            entries = conn.execute(
+                "SELECT id, headword FROM entries "
+                "WHERE headword_lc >= ? AND headword_lc < ? "
+                "ORDER BY headword_lc, headword, id LIMIT ?",
+                (term, term + "\U0010FFFF", limit)).fetchall()
+        if not entries and len(term) >= 3:
+            entries = conn.execute(
+                "SELECT id, headword FROM entries WHERE instr(headword_lc, ?) > 0 "
+                "ORDER BY LENGTH(headword), headword, id LIMIT ?",
+                (term, limit)).fetchall()
+        by_headword = {}
+        for entry_id, headword in entries:
+            display, fragments = by_headword.setdefault(
+                headword.lower(), (headword, []))
+            for (definition,) in conn.execute(
+                    "SELECT definition_my FROM senses WHERE entry_id=? "
+                    "ORDER BY sense_no LIMIT 3", (entry_id,)):
+                for piece in myanmar_definition_fragments(definition):
+                    if piece not in fragments and len(fragments) < 3:
+                        fragments.append(piece)
+        return [
+            (display, normalize_myanmar_text(" ၊ ".join(fragments)))
+            for display, fragments in by_headword.values() if fragments
+        ]
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+
 def lookup_myanmar_detailed(term):
     """(definition, source) — source is 'offline', 'online', or None.
 
@@ -673,6 +740,7 @@ def _lookup_myanmar_online(term):
     if candidates:
         return candidates[0]
     try:
+        _pace_remote_request()
         page = _http_get(ORNAGAI_URL + urllib.parse.quote_plus(term) + "&return=json")
         data = json.loads(page)
         if isinstance(data, list) and data and isinstance(data[0], dict):
@@ -743,18 +811,73 @@ def lookup_chinese(term):
     return fallback
 
 
-_sound_opener = None
-_sound_opener_lock = threading.Lock()
+_sound_local = threading.local()
+_sound_pace_lock = threading.Lock()
+_sound_next_request = 0.0
+_DOWNLOAD_BUSY = object()  # another thread already owns this term
+
+
+def _sound_key(term):
+    """Normalized in-flight key so 'Apple' and 'apple ' share one download."""
+    return (term or "").strip().casefold()
 
 
 def _sound_session():
-    """One opener per app session so the MyOrdbok cookies are kept warm."""
-    global _sound_opener
-    with _sound_opener_lock:
-        if _sound_opener is None:
-            cookies = urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
-            _sound_opener = urllib.request.build_opener(cookies)
-        return _sound_opener
+    """One opener per download thread: each worker keeps its own cookie jar
+    warm instead of sharing a CookieJar across threads."""
+    opener = getattr(_sound_local, "opener", None)
+    if opener is None:
+        cookies = urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+        opener = urllib.request.build_opener(cookies)
+        _sound_local.opener = opener
+    return opener
+
+
+def _pace_remote_request():
+    """Space request starts evenly across download threads."""
+    global _sound_next_request
+    with _sound_pace_lock:
+        now = time.monotonic()
+        slot = max(now, _sound_next_request)
+        _sound_next_request = slot + DOWNLOAD_INTERVAL
+    delay = slot - time.monotonic()
+    if delay > 0:
+        time.sleep(delay)
+
+
+def _parallel_run(func, items, max_workers):
+    """Yield (item, result) as daemon worker threads finish.
+
+    Plain ThreadPoolExecutor workers are joined at interpreter exit, which
+    would make the app wait out in-flight HTTP timeouts on quit; daemon
+    threads are abandoned instead."""
+    items = list(items)
+    max_workers = min(max_workers, len(items))
+    if not max_workers:
+        return
+    pending = queue.Queue()
+    finished = queue.Queue()
+    sentinel = object()
+    for item in items:
+        pending.put(item)
+    for _ in range(max_workers):
+        pending.put(sentinel)  # one sentinel per worker
+
+    def work():
+        while True:
+            item = pending.get()
+            if item is sentinel:
+                return
+            try:
+                finished.put((item, func(item)))
+            except BaseException:
+                finished.put((item, None))
+
+    for index in range(max_workers):
+        threading.Thread(target=work, name="vocapp-download-%d" % index,
+                         daemon=True).start()
+    for _ in range(len(items)):
+        yield finished.get()
 
 
 def _sound_http(url, referer=None, timeout=20):
@@ -782,24 +905,47 @@ def fetch_sound(term):
     term = (term or "").strip()
     if not term:
         return None
+    url = SOUND_API_URL + "?" + urllib.parse.urlencode({"q": term, "l": "en"})
     try:
-        # Warm the session: the speech endpoint requires the definition
-        # page's cookies, so fetch it first (failure is not fatal — a warm
-        # cookie jar from an earlier word may already be enough).
-        try:
-            _sound_http(MYORDBOK_URL + urllib.parse.quote_plus(term))
-        except Exception:
-            pass
-        url = SOUND_API_URL + "?" + urllib.parse.urlencode({"q": term, "l": "en"})
-        data = _sound_http(url, referer=SOUND_REFERER)
-        return data if _is_mp3(data) else None
+        # The speech endpoint requires the definition page's cookies. Each
+        # worker thread warms up once and then reuses its cookie jar, so a
+        # normal check is a single request.
+        for attempt in (0, 1):
+            warmed = getattr(_sound_local, "warm", False)
+            if not warmed:
+                try:
+                    _pace_remote_request()
+                    _sound_http(MYORDBOK_URL + urllib.parse.quote_plus(term))
+                except Exception:
+                    pass  # an older cookie may still satisfy the speech call
+                else:
+                    _sound_local.warm = True
+                    warmed = True
+            _pace_remote_request()
+            try:
+                data = _sound_http(url, referer=SOUND_REFERER)
+            except Exception:
+                if attempt:
+                    raise
+                # The session may have expired; re-warm and retry once.
+                _sound_local.warm = False
+                continue
+            if _is_mp3(data):
+                return data
+            # An HTML/empty body hints at a stale session; a plain non-MP3
+            # payload just means the word has no audio.
+            stale = not data or data.lstrip()[:1] == b"<"
+            if attempt or not warmed or not stale:
+                return None
+            _sound_local.warm = False
     except Exception:
         return None
+    return None
 
 
 def get_sound(word_id):
     """Stored MP3 bytes for a word row (or None)."""
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=30)
     try:
         row = conn.execute("SELECT sound FROM words WHERE id=?", (word_id,)).fetchone()
     finally:
@@ -808,7 +954,7 @@ def get_sound(word_id):
 
 
 def store_sound(word_id, data):
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=30)
     try:
         conn.execute("UPDATE words SET sound=? WHERE id=?", (data, word_id))
         conn.commit()
@@ -1369,6 +1515,11 @@ class _LookupSignals(QObject):
     finished = Signal(str, object, str, object)   # english, mm, mm source, cn
 
 
+class _SearchSignals(QObject):
+    # category is object: PyQt would coerce None into "" for a str parameter.
+    dictionary_ready = Signal(int, str, object, object)  # token, term, category, rows
+
+
 class _SoundSignals(QObject):
     word_done = Signal(int, str, bool)      # word_id, english, success
     progress = Signal(int, int, int)        # done, total, failed
@@ -1720,6 +1871,11 @@ class VocabApp(QMainWindow):
         self._lookup_inflight = set()
         self.lookup_signals = _LookupSignals()
         self.lookup_signals.finished.connect(self._apply_lookup)
+        self.search_signals = _SearchSignals()
+        self.search_signals.dictionary_ready.connect(self._on_dictionary_ready)
+        self._dict_search_token = 0
+        self._dict_search_inflight = None
+        self._dict_search_latest = None
         self._lookup_timer = QTimer(self)
         self._lookup_timer.setSingleShot(True)
         self._lookup_timer.setInterval(800)
@@ -1748,6 +1904,7 @@ class VocabApp(QMainWindow):
         self.word_count_label.setObjectName("chipLabel")
 
         self.status_label = QLabel("Ready — tap the Chinese column to see the character breakdown")
+        self.status_label.setTextFormat(Qt.TextFormat.PlainText)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -1906,7 +2063,12 @@ class VocabApp(QMainWindow):
         self.ent_search = QLineEdit()
         self.ent_search.setPlaceholderText(SEARCH_PLACEHOLDER)
         self.ent_search.setFixedWidth(280)
-        self.ent_search.textChanged.connect(self.load_words)
+        # Debounce typing so the dictionary fallback does not run per keystroke.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(200)
+        self._search_timer.timeout.connect(self.load_words)
+        self.ent_search.textChanged.connect(self._on_search_text)
         toolbar.addWidget(self.ent_search)
         clear_btn = QPushButton("Clear", objectName="softButton")
         clear_btn.clicked.connect(self.reset_search)
@@ -1988,16 +2150,20 @@ class VocabApp(QMainWindow):
             self.reset_search()
             self.setFocus()
 
-    def reset_search(self, refresh=True):
+    def reset_search(self, *_args, refresh=True):
         self.filter_box.blockSignals(True)
         self.filter_box.setCurrentIndex(0)
         self.filter_box.blockSignals(False)
         self.ent_search.clear()
+        self._search_timer.stop()  # clear() already scheduled a reload
         if refresh:
             self.load_words()
 
     def current_category_filter(self):
         return self.filter_box.currentData()
+
+    def _on_search_text(self, *_args):
+        self._search_timer.start()
 
     def on_sort_indicator(self, col, order):
         self.sort_col = col
@@ -2021,6 +2187,11 @@ class VocabApp(QMainWindow):
             return None
         word_id = self._item_word_id(items[0])
         if word_id is None:
+            if items[0].text(3) == "Dictionary":
+                QMessageBox.information(
+                    self, "Dictionary result",
+                    "This row comes from the local dictionary and is not a saved "
+                    "word — add it to your library first.")
             return None
         texts = [items[0].text(i) for i in range(5)]
         return word_id, texts
@@ -2140,19 +2311,28 @@ class VocabApp(QMainWindow):
         """Download and store the MP3 for one word in the background."""
         if not eng or not word_id:
             return
+        key = _sound_key(eng)
         with self._sound_lock:
-            if eng in self._sound_downloading:
+            if key in self._sound_downloading:
                 return
-            self._sound_downloading.add(eng)
+            self._sound_downloading.add(key)
         self.status_label.setText(f"Downloading sound for “{eng}”…")
         threading.Thread(target=self._sound_download_worker, args=(word_id, eng),
                          daemon=True).start()
 
     def _sound_download_worker(self, word_id, eng):
-        data = fetch_sound(eng)
-        if data:
-            store_sound(word_id, data)
-        self.sound_signals.word_done.emit(word_id, eng, bool(data))
+        ok = False
+        try:
+            data = fetch_sound(eng)
+            if data:
+                store_sound(word_id, data)
+                ok = True
+        except Exception:
+            ok = False
+        finally:
+            with self._sound_lock:
+                self._sound_downloading.discard(_sound_key(eng))
+        self.sound_signals.word_done.emit(word_id, eng, ok)
 
     def start_sound_backfill(self):
         """Download audio for every existing word that has none (startup job)."""
@@ -2164,42 +2344,91 @@ class VocabApp(QMainWindow):
             "WHERE sound IS NULL AND TRIM(english) != '' ORDER BY id"
         ).fetchall()
         conn.close()
-        # Group by English term: duplicate rows share one download.
+        # Group by normalized English term: duplicate rows share one
+        # download, and case variants ("Apple"/"apple") must not compete for
+        # the same in-flight key.
         groups = {}
         for word_id, eng in rows:
-            groups.setdefault(eng.strip(), []).append(word_id)
-        pending = [(eng, ids) for eng, ids in groups.items() if eng]
+            key = _sound_key(eng)
+            if not key:
+                continue
+            group = groups.setdefault(key, [eng.strip(), []])
+            group[1].append(word_id)
+        pending = [(eng, ids) for eng, ids in groups.values() if eng]
         if not pending:
             return
         self._backfill_running = True
         self.sound_signals.progress.emit(0, len(pending), 0)
         threading.Thread(target=self._backfill_worker, args=(pending,), daemon=True).start()
 
+    def _download_sound_group(self, eng, word_ids):
+        """Worker-thread body. Returns True when audio was stored, False when
+        the word has no audio, _DOWNLOAD_BUSY when another download owns it."""
+        key = _sound_key(eng)
+        with self._sound_lock:
+            owner = key not in self._sound_downloading
+            if owner:
+                self._sound_downloading.add(key)
+        if not owner:
+            return _DOWNLOAD_BUSY
+        try:
+            data = fetch_sound(eng)
+            if not data:
+                return False
+            for word_id in word_ids:
+                store_sound(word_id, data)
+            return True
+        finally:
+            with self._sound_lock:
+                self._sound_downloading.discard(key)
+
+    @staticmethod
+    def _group_has_no_sound(word_ids):
+        placeholders = ",".join("?" * len(word_ids))
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=30)
+        except sqlite3.Error:
+            return True
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM words WHERE id IN (%s) AND sound IS NULL"
+                % placeholders, word_ids).fetchone()
+        except sqlite3.Error:
+            return True
+        finally:
+            conn.close()
+        return bool(row and row[0])
+
     def _backfill_worker(self, pending):
         total = len(pending)
         done = failed = 0
-        for eng, word_ids in pending:
-            with self._sound_lock:
-                busy = eng in self._sound_downloading
-                self._sound_downloading.add(eng)
-            data = None
-            if not busy:
-                data = fetch_sound(eng)
-                if data:
-                    for word_id in word_ids:
-                        store_sound(word_id, data)
+        try:
+            workers = min(DOWNLOAD_WORKERS, total)
+            for (eng, word_ids), ok in _parallel_run(
+                    lambda item: self._download_sound_group(*item),
+                    pending, workers):
+                done += 1
+                if ok is _DOWNLOAD_BUSY:
+                    # A manual download owns this term; it may or may not
+                    # have filled these rows, so check before reporting.
+                    if self._group_has_no_sound(word_ids):
+                        failed += 1
                 else:
-                    failed += 1
-            self.sound_signals.word_done.emit(word_ids[0], eng, bool(data))
-            done += 1
-            self.sound_signals.progress.emit(done, total, failed)
-            time.sleep(SOUND_RETRY_DELAY)
-            with self._sound_lock:
-                self._sound_downloading.discard(eng)
+                    if ok is not True:
+                        failed += 1
+                    # Results (and progress) are emitted from this one thread
+                    # so the status bar sees a monotonic done count.
+                    self.sound_signals.word_done.emit(
+                        word_ids[0], eng, bool(ok))
+                self.sound_signals.progress.emit(done, total, failed)
+        finally:
+            if done < total:
+                # Never leave the UI stuck on "Downloading sounds…" if a
+                # worker dies mid-run; the rest will retry next start.
+                self.sound_signals.progress.emit(
+                    total, total, failed + (total - done))
 
     def _on_sound_saved(self, word_id, eng, ok):
-        with self._sound_lock:
-            self._sound_downloading.discard(eng)
         self._set_item_sound_icon(word_id, ok)
         if self._backfill_running:
             # The progress line is already covering the status bar.
@@ -2311,10 +2540,11 @@ class VocabApp(QMainWindow):
         if not MULTIMEDIA_OK:
             self.status_label.setText("Playback unavailable — PySide6.QtMultimedia is missing")
             return
+        key = _sound_key(eng)
         with self._sound_lock:
-            if eng in self._sound_downloading:
+            if key in self._sound_downloading:
                 return
-            self._sound_downloading.add(eng)
+            self._sound_downloading.add(key)
         self.status_label.setText(f"Sound not stored yet for “{eng}” — fetching online…")
         threading.Thread(target=self._play_online_worker, args=(word_id, eng),
                          daemon=True).start()
@@ -2341,22 +2571,28 @@ class VocabApp(QMainWindow):
         if not MULTIMEDIA_OK:
             self.status_label.setText("Playback unavailable — PySide6.QtMultimedia is missing")
             return
+        key = _sound_key(eng)
         with self._sound_lock:
-            if eng in self._sound_downloading:
+            if key in self._sound_downloading:
                 return
-            self._sound_downloading.add(eng)
+            self._sound_downloading.add(key)
         self.status_label.setText(f"Fetching sound for “{eng}” online…")
         threading.Thread(target=self._play_online_worker, args=(None, eng), daemon=True).start()
 
     def _play_online_worker(self, word_id, eng):
-        data = fetch_sound(eng)
-        if data and word_id:
-            store_sound(word_id, data)
+        data = None
+        try:
+            data = fetch_sound(eng)
+            if data and word_id:
+                store_sound(word_id, data)
+        except Exception:
+            data = None
+        finally:
+            with self._sound_lock:
+                self._sound_downloading.discard(_sound_key(eng))
         self.sound_signals.play_ready.emit(word_id or 0, eng, data)
 
     def _on_play_ready(self, word_id, eng, data):
-        with self._sound_lock:
-            self._sound_downloading.discard(eng)
         if data:
             if word_id:
                 self._set_item_sound_icon(word_id, True)
@@ -2545,6 +2781,10 @@ class VocabApp(QMainWindow):
         for item in items:
             word_id = self._item_word_id(item)
             if word_id is None:
+                if item.text(3) == "Dictionary":
+                    QMessageBox.information(
+                        self, "Dictionary result",
+                        "Dictionary results are not saved words — nothing to delete.")
                 return
             ids.append(word_id)
         answer = QMessageBox.question(
@@ -2623,11 +2863,13 @@ class VocabApp(QMainWindow):
         rows = self._current_rows()
         term = normalize_myanmar_text(self.ent_search.text())
         category = self.current_category_filter()
+        self._dict_search_token += 1
+        token = self._dict_search_token
 
         self.tree.clear()
         for row_number, row in enumerate(rows, start=1):
             # Query order is (id, english, chinese, category, myanmar, sound).
-            word_id, english, chinese, category, myanmar, sound = (
+            word_id, english, chinese, row_category, myanmar, sound = (
                 row[0], row[1], row[2],
                 row[3] if len(row) > 4 and row[3] else CATEGORIES[0],
                 row[4] if len(row) > 4 else "",
@@ -2636,7 +2878,7 @@ class VocabApp(QMainWindow):
             # Show a sequential number 1..N for the current view; keep the
             # real database id in the item's UserRole data for edit/delete.
             item = QTreeWidgetItem((
-                str(row_number), english or "", chinese or "", category,
+                str(row_number), english or "", chinese or "", row_category,
                 myanmar or "", "🔊" if sound else "",
             ))
             item.setData(0, Qt.ItemDataRole.UserRole, word_id)
@@ -2648,16 +2890,13 @@ class VocabApp(QMainWindow):
             )
             self.tree.addTopLevelItem(item)
 
-        if len(rows) == 0:
-            if term:
-                message = "No words match \u201c%s\u201d — try another search" % term
-            elif category:
-                message = "No %s words yet — add one above" % category
-            else:
-                message = "Your library is empty — add your first word above"
-            item = QTreeWidgetItem(("", message, "", "", "", ""))
-            item.setForeground(1, self.palette().color(self.palette().ColorRole.Mid))
-            self.tree.addTopLevelItem(item)
+        searching = bool(not rows and term and re.search(r"[A-Za-z]", term))
+        if searching:
+            # The dictionary fallback may scan the whole Ornagai table; keep
+            # it off the UI thread. _on_dictionary_ready fills the rows.
+            self._start_dictionary_search(token, term, category)
+        elif not rows:
+            self._add_empty_message(term, category)
 
         self.tree.header().setSortIndicator(
             self.sort_col,
@@ -2670,14 +2909,88 @@ class VocabApp(QMainWindow):
             parts.append(f"category: {category}")
         if term:
             parts.append(f"filter: \u201c{term}\u201d")
-        self.status_label.setText(f"{len(rows)} shown" + (" • " + " • ".join(parts) if parts else ""))
-        if self._backfill_running:
-            # Keep the download progress visible after list refreshes.
-            done, total, failed = getattr(self, "_sound_progress_state", (0, 0, 0))
-            detail = f" • downloading sounds… {done}/{total}"
-            if failed:
-                detail += f" ({failed} missed)"
-            self.status_label.setText(self.status_label.text() + detail)
+        if searching:
+            parts.insert(0, "Searching the dictionary…")
+        message = f"{len(rows)} shown"
+        if parts:
+            message += " • " + " • ".join(parts)
+        self.status_label.setText(self._with_download_status(message))
+
+    def _start_dictionary_search(self, token, term, category):
+        """Single-flight the fallback: typing pauses must not pile up scans
+        of the 56 MB dictionary on stale terms."""
+        self._dict_search_latest = (token, term, category)
+        if self._dict_search_inflight == (term, category):
+            return
+        self._dict_search_inflight = (term, category)
+        threading.Thread(
+            target=self._dictionary_search_worker,
+            args=(token, term, category), daemon=True).start()
+
+    def _dictionary_search_worker(self, token, term, category):
+        rows = []
+        try:
+            rows = search_ornagai(term)
+        except Exception:
+            rows = []
+        finally:
+            if self._dict_search_inflight == (term, category):
+                self._dict_search_inflight = None
+            latest = self._dict_search_latest
+            if latest and latest[1:] == (term, category):
+                token = latest[0]  # a refresh reused this running search
+            self.search_signals.dictionary_ready.emit(token, term, category, rows)
+
+    def _on_dictionary_ready(self, token, term, category, dict_rows):
+        current_term = normalize_myanmar_text(self.ent_search.text())
+        if (token != self._dict_search_token or term != current_term
+                or category != self.current_category_filter()):
+            return
+        dict_scope = ("not in this category" if category
+                      else "not in your library")
+        if dict_rows:
+            self._add_dictionary_rows(dict_rows, dict_scope)
+            parts = [f"{len(dict_rows)} dictionary result(s) — {dict_scope}"]
+        else:
+            self._add_empty_message(term, category)
+            parts = ["0 shown"]
+        if category:
+            parts.append(f"category: {category}")
+        if term:
+            parts.append(f"filter: \u201c{term}\u201d")
+        self.status_label.setText(self._with_download_status(" • ".join(parts)))
+
+    def _add_dictionary_rows(self, dict_rows, dict_scope):
+        for headword, definition in dict_rows:
+            item = QTreeWidgetItem(("—", headword, "", "Dictionary", definition, ""))
+            item.setTextAlignment(0, Qt.AlignmentFlag.AlignCenter)
+            headword_font = item.font(1)
+            headword_font.setItalic(True)
+            item.setFont(1, headword_font)
+            item.setToolTip(
+                3, "Result from the local Ornagai dictionary — %s" % dict_scope)
+            self.tree.addTopLevelItem(item)
+
+    def _add_empty_message(self, term, category):
+        if term:
+            message = "No words match \u201c%s\u201d — try another search" % term
+        elif category:
+            message = "No %s words yet — add one above" % category
+        else:
+            message = "Your library is empty — add your first word above"
+        item = QTreeWidgetItem(("", message, "", "", "", ""))
+        item.setForeground(1, self.palette().color(self.palette().ColorRole.Mid))
+        self.tree.addTopLevelItem(item)
+
+    def _with_download_status(self, text):
+        """Keep the sound-download progress visible after list refreshes."""
+        if not self._backfill_running:
+            return text
+        done, total, failed = getattr(self, "_sound_progress_state", (0, 0, 0))
+        detail = f" • downloading sounds… {done}/{total}"
+        if failed:
+            detail += f" ({failed} missed)"
+        return text + detail
 
     def _total_count(self):
         conn = sqlite3.connect(DB_FILE)
@@ -2718,8 +3031,11 @@ class VocabApp(QMainWindow):
         self.status_label.setText(f"Exported {word_count} word(s) to {format_name} — {path}")
 
     def open_quiz(self):
+        category = self.current_category_filter()
         quiz = QDialog(self)
-        quiz.setWindowTitle("VocApp | Quick Quiz")
+        quiz.setWindowTitle(
+            "VocApp | Quick Quiz — %s" % category if category
+            else "VocApp | Quick Quiz")
         quiz.resize(1040, 680)
         quiz.setMinimumSize(860, 520)
 
@@ -2734,8 +3050,12 @@ class VocabApp(QMainWindow):
         title = QLabel("Quick Quiz", objectName="titleLabel")
         title.setStyleSheet("font-size: 16pt;")
         header_layout.addWidget(title)
-        header_layout.addWidget(QLabel("A random set of 10 words from your library",
-                                       objectName="subtitleLabel"))
+        subtitle = QLabel(
+            "A random set of 10 words from your library" if not category
+            else "A random set of 10 words from %s" % category,
+            objectName="subtitleLabel")
+        subtitle.setTextFormat(Qt.TextFormat.PlainText)
+        header_layout.addWidget(subtitle)
         layout.addWidget(header)
 
         body = QWidget(objectName="quizBody")
@@ -2768,6 +3088,7 @@ class VocabApp(QMainWindow):
         body_layout.addWidget(quiz_tree, 1)
 
         quiz_status = QLabel("", objectName="hintLabel")
+        quiz_status.setTextFormat(Qt.TextFormat.PlainText)
         quiz_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         body_layout.addWidget(quiz_status)
 
@@ -2781,13 +3102,22 @@ class VocabApp(QMainWindow):
         def refresh_quiz():
             quiz_tree.clear()
             conn = sqlite3.connect(DB_FILE)
+            where = ""
+            params = ()
+            if category:
+                where = " WHERE LOWER(category) = LOWER(?)"
+                params = (category,)
             rows = conn.execute(
-                "SELECT english, category, myanmar, chinese FROM words ORDER BY RANDOM() LIMIT 10"
+                "SELECT english, category, myanmar, chinese FROM words%s "
+                "ORDER BY RANDOM() LIMIT 10" % where,
+                params,
             ).fetchall()
-            total = conn.execute("SELECT COUNT(*) FROM words").fetchone()[0]
+            total = conn.execute(
+                "SELECT COUNT(*) FROM words%s" % where, params
+            ).fetchone()[0]
             conn.close()
             if not rows:
-                rows = [("Add words first…", "—", "", "")]
+                rows = [("Add words first…", "—", "", "")] if not category else []
             for number, row in enumerate(rows, start=1):
                 row = list(row)
                 if not row[1]:
@@ -2801,8 +3131,12 @@ class VocabApp(QMainWindow):
                 item.setFont(4, QFont(base_font.family(), 12))
                 quiz_tree.addTopLevelItem(item)
             if total:
+                scope = "%s " % category if category else ""
                 quiz_status.setText(
-                    f"Showing {len(rows)} random words of {total} — press F5 or Refresh for a new set")
+                    f"Showing {len(rows)} random {scope}words of {total} — "
+                    "press F5 or Refresh for a new set")
+            elif category:
+                quiz_status.setText(f"No {category} words yet — add some first")
             else:
                 quiz_status.setText("Your library is empty — add words first")
 

@@ -5,10 +5,14 @@ VocApp is a small desktop vocabulary manager built with Python and PySide6 (Qt).
 ## Features
 
 - Add English, Chinese, and Myanmar vocabulary.
-- Search words across all three language fields.
+- Search words across all three language fields. When nothing matches your
+  library, matching entries from the local `ornagai.db` dictionary are shown
+  as italic **Dictionary** rows (clearly not saved words). The dictionary
+  lookup runs in the background, so the window stays responsive while typing.
 - Edit and delete saved vocabulary.
 - Add or update a Chinese definition for a selected word.
-- Open a quiz window with up to 10 randomly selected words.
+- Open a quiz window with up to 10 randomly selected words from the selected
+  category filter (the whole library when **All categories** is chosen).
 - Use Myanmar-compatible fonts when available.
 - Package the application as a Windows executable with PyInstaller.
 - Pronunciation audio: word sounds are downloaded from MyOrdbok automatically
@@ -90,12 +94,31 @@ Remove the menu entry with:
 
 1. Enter English and Myanmar text. Chinese is optional.
 2. Select **Save Word** to add the vocabulary.
-3. Use the search field to filter the vocabulary table.
+3. Use the search field to filter the vocabulary table. If no saved word
+   matches, results from the local English→Myanmar dictionary (`ornagai.db`)
+   appear in italic **Dictionary** rows — they cannot be edited or deleted
+   until you add them to your library.
 4. Select a row and choose **Edit Selected** to update it.
 5. Choose **Cancel Edit** to leave edit mode without saving changes.
 6. Choose **Delete Selected** to remove selected words.
 7. Choose **Add Chinese to Selected** to add a Chinese definition to the selected row.
-8. Choose **Open Quiz**, then **Refresh Items** to display a new random set of up to 10 words.
+8. Choose **Open Quiz**, then **Refresh Items** to display a new random set of up to 10 words from the selected category filter.
+
+## Vocabulary by Category (data/vocab_by_category.csv)
+
+`data/vocab_by_category.csv` (`category_zh,category_en,english,chinese`) is
+imported with:
+
+```bash
+.env/bin/python import_vocab_by_category.py --online
+```
+
+Chinese is converted to the app's `Traditional (pinyin)` format, Myanmar is
+filled from `ornagai.db` (add `--online` to query MyOrdbok for words the local
+dictionary misses), and `--dry-run` previews the changes without writing. Rows
+already present (same English + category) are skipped; if such a row has an
+empty Myanmar gloss, it is filled. The import is safe to re-run, and each CSV
+category becomes a category in the GUI's filter.
 
 ## Database Location
 
@@ -189,8 +212,10 @@ Myanmar glosses are original content of this project.
 ```text
 vocapp.py                     Main PySide6 application
 build_chinese_breakdown.py    Generator for the per-character data
+import_vocab_by_category.py   Importer for data/vocab_by_category.csv
 install-desktop.sh            Linux applications-menu entry (install/uninstall)
 data/hanzi_myanmar.csv        Curated Myanmar glosses per character
+data/vocab_by_category.csv    Categorized vocabulary source data
 requirements.txt              Python package requirements
 assets/icon.png               Application icon
 fonts/                        Optional Myanmar font files
@@ -200,4 +225,5 @@ vocabulary.db                 Local database created at runtime
 ## Notes
 
 - The database path follows the application folder; `DB_FILE` can be reassigned before `init_db()` when embedding or testing.
+- Background downloads (pronunciation audio and online gloss suggestions) run in a small worker pool paced by `VOCAPP_SOUND_WORKERS` (default 4; `VOCAPP_LOOKUP_WORKERS`, default 2, for gloss lookups) and `VOCAPP_SOUND_INTERVAL` (default 0.5 s), so the dictionary sites are not hammered by the parallel requests.
 - `build/`, `dist/`, `env/`, `.env/` and Python cache files are ignored by Git.

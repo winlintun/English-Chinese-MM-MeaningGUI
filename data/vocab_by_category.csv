@@ -1,0 +1,470 @@
+﻿category_zh,category_en,english,chinese
+颜色,Colors,red,红色
+颜色,Colors,yellow,黄色
+颜色,Colors,orange,橙色的
+颜色,Colors,green,"绿色,绿色的"
+颜色,Colors,white,白色的
+颜色,Colors,indigo,靛蓝色
+颜色,Colors,purple,紫色的
+颜色,Colors,blue,蓝色；蓝色的
+颜色,Colors,camel,驼色的
+颜色,Colors,chocolate,深褐色
+颜色,Colors,brown,褐色，棕色
+颜色,Colors,gray,灰色；灰色的
+颜色,Colors,pink,粉红色
+颜色,Colors,golden,金色
+颜色,Colors,silver,银白色
+颜色,Colors,violet,紫罗兰色的
+时间,Time,Monday,周一
+时间,Time,Tuesday,周二
+时间,Time,Wednesday,周三
+时间,Time,Thursday,周四
+时间,Time,Friday,周五
+时间,Time,Saturday,周六
+时间,Time,Sunday,星期天
+时间,Time,weekend,周末
+时间,Time,January,一月
+时间,Time,February,二月
+时间,Time,March,三月
+时间,Time,April,四月
+时间,Time,May,五月
+时间,Time,June,六月
+时间,Time,July,七月
+时间,Time,August,八月
+时间,Time,September,九月
+时间,Time,October,十月
+时间,Time,November,十一月
+时间,Time,December,十二月
+时间,Time,season,四季
+时间,Time,morning,上午
+时间,Time,high noon,正午
+时间,Time,afternoon,下午
+时间,Time,A.M.,上午
+时间,Time,P.M.,下午
+时间,Time,spring,春天
+时间,Time,summer,夏天
+时间,Time,fall,秋天
+时间,Time,winter,冬天
+时间,Time,yesterday,昨天
+时间,Time,tomorrow,明天
+肉类,Meat,meat,肉
+肉类,Meat,beef,牛肉
+肉类,Meat,veal,小牛肉
+肉类,Meat,lamb,羔羊肉
+肉类,Meat,mutton,羊肉
+肉类,Meat,pork,猪肉
+肉类,Meat,chop,排骨
+肉类,Meat,roast,烤肉
+肉类,Meat,cutlet,肉条
+肉类,Meat,stew,焖；炖肉
+肉类,Meat,duck,鸭
+肉类,Meat,turkey,火鸡
+肉类,Meat,chicken,鸡肉
+肉类,Meat,sausage,香肠
+肉类,Meat,bacon,培根；熏肉
+肉类,Meat,fish,鱼
+肉类,Meat,ham,火腿
+肉类,Meat,broth,肉汤
+肉类,Meat,steak,牛排
+肉类,Meat,sirloin,牛里脊肉
+水果,Fruit,pear,梨
+水果,Fruit,peach,桃
+水果,Fruit,plum,李子
+水果,Fruit,grape,葡萄
+水果,Fruit,banana,香蕉
+水果,Fruit,pineapple,菠萝
+水果,Fruit,lemon,柠檬
+水果,Fruit,loquat,枇杷
+水果,Fruit,cherry,樱桃
+水果,Fruit,orange,橙子
+水果,Fruit,mango,芒果
+水果,Fruit,mulberry,桑椹
+水果,Fruit,date,枣
+水果,Fruit,fig,无花果
+水果,Fruit,walnut,核桃
+水果,Fruit,peanut,花生
+水果,Fruit,hazelnut,榛子
+水果,Fruit,persimmon,柿子
+水果,Fruit,apricot,杏
+水果,Fruit,coconut,椰子
+水果,Fruit,chestnut,栗子
+水果,Fruit,sugarcane,甘蔗
+水果,Fruit,strawberry,草莓
+水果,Fruit,watermelon,西瓜
+蔬菜,Vegetables,onion,葱
+蔬菜,Vegetables,garlic,蒜
+蔬菜,Vegetables,celery,芹菜
+蔬菜,Vegetables,fennel,茴香
+蔬菜,Vegetables,capsicum,辣椒
+蔬菜,Vegetables,melon,香瓜，甜瓜
+蔬菜,Vegetables,chili,红辣椒
+蔬菜,Vegetables,carrot,胡萝卜
+蔬菜,Vegetables,potato,马铃薯
+蔬菜,Vegetables,pumpkin,南瓜
+蔬菜,Vegetables,cauliflower,花菜
+蔬菜,Vegetables,cabbage,卷心菜
+蔬菜,Vegetables,pea,豌豆
+蔬菜,Vegetables,leek,韭菜
+蔬菜,Vegetables,radish,萝卜
+蔬菜,Vegetables,spinach,菠菜
+蔬菜,Vegetables,mushroom,蘑菇
+蔬菜,Vegetables,lettuce,莴苣，生菜
+蔬菜,Vegetables,eggplant,茄子
+蔬菜,Vegetables,bean,豆，菜豆
+蔬菜,Vegetables,tomato,西红柿
+蔬菜,Vegetables,cucumber,黄瓜
+蔬菜,Vegetables,beetroot,甜菜根
+蔬菜,Vegetables,asparagus,芦笋
+主食,Staple food,loaf,长面包
+主食,Staple food,noodle,面条
+主食,Staple food,biscuit,饼干
+主食,Staple food,Pizza,比萨饼
+主食,Staple food,cake,蛋糕
+主食,Staple food,bread,面包
+主食,Staple food,crust,面包皮
+主食,Staple food,sandwich,三明治
+主食,Staple food,pie,馅饼
+主食,Staple food,congee,粥
+主食,Staple food,mooncake,月饼
+主食,Staple food,hamburger,汉堡
+主食,Staple food,rice,米饭
+主食,Staple food,cookie,甜饼干
+主食,Staple food,dumpling,饺子
+主食,Staple food,pancake,薄煎饼
+天气,Weather,frost,霜
+天气,Weather,fine,晴天
+天气,Weather,dull,阴天的
+天气,Weather,rainy,下雨的
+天气,Weather,climate,气候
+天气,Weather,sunny,晴朗的
+天气,Weather,windy,刮风的
+天气,Weather,weather,天气
+天气,Weather,atmosphere,大气
+天气,Weather,rain,雨
+天气,Weather,wind,风
+天气,Weather,mist,薄雾
+天气,Weather,haze,阴霾
+天气,Weather,cloud,阴云
+天气,Weather,storm,暴风
+天气,Weather,shower,阵雨
+天气,Weather,lightning,闪电
+天气,Weather,hurricane,暴风
+天气,Weather,fog,浓雾
+天气,Weather,dew,露水
+天气,Weather,flood,洪水
+天气,Weather,freeze,冰冻
+天气,Weather,breeze,微风
+天气,Weather,drought,干旱
+天气,Weather,rainbow,彩虹
+天气,Weather,humidity,潮湿
+天气,Weather,monsoon,季风
+天气,Weather,snow,雪
+天气,Weather,hail,冰雹
+天气,Weather,tide,潮汐
+天气,Weather,thunder,雷
+天气,Weather,cyclone,旋风
+天气,Weather,typhoon,台风
+天气,Weather,sunlight,阳光
+天气,Weather,tornado,龙卷风
+天气,Weather,earthquake,地震
+餐具,Tableware,bowl,碗
+餐具,Tableware,table,餐桌
+餐具,Tableware,napkin,餐巾
+餐具,Tableware,tablecloth,桌布
+餐具,Tableware,menu,菜单菜谱
+餐具,Tableware,fork,叉
+餐具,Tableware,knife,刀
+餐具,Tableware,ladle,长柄勺
+餐具,Tableware,teaspoon,茶匙
+餐具,Tableware,spoon,匙，勺子
+餐具,Tableware,tray,托盘
+餐具,Tableware,coffeepot,咖啡壶
+餐具,Tableware,cutlery,餐具
+餐具,Tableware,glass,玻璃杯
+餐具,Tableware,cup,杯子
+餐具,Tableware,bottle,瓶子
+餐具,Tableware,saucer,茶碟
+餐具,Tableware,teapot,茶壶
+身体部位,Body parts,face,脸
+身体部位,Body parts,head,头
+身体部位,Body parts,hip,臀部
+身体部位,Body parts,ear,耳朵
+身体部位,Body parts,eye,眼睛
+身体部位,Body parts,hair,头发
+身体部位,Body parts,back,背部
+身体部位,Body parts,finger,手指
+身体部位,Body parts,cheek,脸颊
+身体部位,Body parts,buttock,屁股
+身体部位,Body parts,thumb,大拇指
+身体部位,Body parts,shoulder,肩膀
+身体部位,Body parts,forefinger,食指
+身体部位,Body parts,little finger,小指
+身体部位,Body parts,middle finger,中指
+身体部位,Body parts,lid,眼睑
+身体部位,Body parts,waist,腰
+身体部位,Body parts,nail,指甲
+身体部位,Body parts,gum,牙龈
+身体部位,Body parts,nose,鼻子
+身体部位,Body parts,neck,脖子
+身体部位,Body parts,skull,颅骨
+身体部位,Body parts,palm,手掌
+身体部位,Body parts,tooth,牙齿
+身体部位,Body parts,thigh,大腿
+身体部位,Body parts,knee,膝盖
+身体部位,Body parts,throat,咽喉
+身体部位,Body parts,tongue,舌头
+身体部位,Body parts,tonsil,扁桃体
+身体部位,Body parts,denture,假齿
+身体部位,Body parts,foot,脚
+身体部位,Body parts,toe,脚趾
+身体部位,Body parts,bald,秃头
+身体部位,Body parts,wrist,手腕
+身体部位,Body parts,elbow,肘部
+身体部位,Body parts,armpit,腋下
+身体部位,Body parts,instep,脚背
+身体部位,Body parts,heel,脚后跟
+身体部位,Body parts,wrinkle,皱纹
+身体部位,Body parts,ankle,踝关节
+身体部位,Body parts,beard,山羊胡
+身体部位,Body parts,forehead,前额
+身体部位,Body parts,temple,太阳穴
+身体部位,Body parts,whisker,络腮胡
+身体部位,Body parts,sideburns,鬓角
+身体部位,Body parts,lip,嘴唇
+身体部位,Body parts,fist,拳头
+身体部位,Body parts,brain,脑
+身体部位,Body parts,mole,痣
+身体部位,Body parts,mouth,嘴
+身体部位,Body parts,chin,下巴
+身体部位,Body parts,sole,脚底
+身体部位,Body parts,navel,肚脐
+身体部位,Body parts,calf,小腿肚
+身体部位,Body parts,chest,胸部
+身体部位,Body parts,shank,小腿
+身体部位,Body parts,freckle,雀斑
+身体部位,Body parts,dimple,酒窝
+身体部位,Body parts,pimple,粉刺
+身体部位,Body parts,abdomen,腹部
+服饰,Clothing & accessories,clothing,服装
+服饰,Clothing & accessories,suit,男西装男外衣
+服饰,Clothing & accessories,dress,女装，连衣裙
+服饰,Clothing & accessories,uniform,制服
+服饰,Clothing & accessories,necklace,项链
+服饰,Clothing & accessories,sandal,凉鞋，便鞋
+服饰,Clothing & accessories,apron,围裙
+服饰,Clothing & accessories,earring,耳环，耳饰
+服饰,Clothing & accessories,button,纽扣
+服饰,Clothing & accessories,pocket,衣袋，口袋
+服饰,Clothing & accessories,sleeve,袖子，衣袖
+服饰,Clothing & accessories,shirt,衬衫
+服饰,Clothing & accessories,tie,领带
+服饰,Clothing & accessories,vest,背心，汗衫
+服饰,Clothing & accessories,sock,短袜，袜子
+服饰,Clothing & accessories,raincoat,雨衣
+服饰,Clothing & accessories,blouse,女衬衫
+服饰,Clothing & accessories,belt,腰带
+服饰,Clothing & accessories,skirt,裙子
+服饰,Clothing & accessories,handkerchief,手帕
+服饰,Clothing & accessories,cotton,棉花
+服饰,Clothing & accessories,perfume,香水
+服饰,Clothing & accessories,jeans,牛仔裤
+服饰,Clothing & accessories,sneaker,运动鞋
+服饰,Clothing & accessories,stocking,长筒袜
+服饰,Clothing & accessories,slipper,拖鞋
+服饰,Clothing & accessories,tissue,纸巾
+服饰,Clothing & accessories,collar,衣领，领子
+服饰,Clothing & accessories,heel,鞋后跟
+服饰,Clothing & accessories,boot,靴子
+服饰,Clothing & accessories,glove,手套
+服饰,Clothing & accessories,ring,戒指
+服饰,Clothing & accessories,purse,手提包
+服饰,Clothing & accessories,muffler,围巾
+服饰,Clothing & accessories,shorts,短裤
+服饰,Clothing & accessories,pants,裤子；短裤
+服饰,Clothing & accessories,lipstick,口红，唇膏
+服饰,Clothing & accessories,wallet,钱包皮夹
+日用品,Daily necessities,comb,梳子
+日用品,Daily necessities,glass,玻璃杯
+日用品,Daily necessities,umbrella,雨伞
+日用品,Daily necessities,bag,袋子，包
+日用品,Daily necessities,handbag,手提包
+日用品,Daily necessities,tap,水龙头
+日用品,Daily necessities,handkerchief,手帕
+日用品,Daily necessities,purse,钱包
+日用品,Daily necessities,wallet,钱包，皮夹
+日用品,Daily necessities,watch,手表
+日用品,Daily necessities,match,火柴
+日用品,Daily necessities,chair,椅子
+日用品,Daily necessities,armchair,扶手椅
+日用品,Daily necessities,bench,长椅子
+日用品,Daily necessities,rug,地毯
+日用品,Daily necessities,carpet,地毯
+日用品,Daily necessities,refrigerator,冰箱
+日用品,Daily necessities,stereo,立体音响
+日用品,Daily necessities,toilet,卫生间，厕所
+日用品,Daily necessities,desk,书桌，办公桌
+日用品,Daily necessities,fan,风扇
+日用品,Daily necessities,furniture,家具
+日用品,Daily necessities,bed,床
+日用品,Daily necessities,bedclothes,铺盖
+日用品,Daily necessities,blanket,毛毯，毯子
+日用品,Daily necessities,pillow,枕头
+日用品,Daily necessities,quilt,棉被，被子
+日用品,Daily necessities,sheet,床单
+日用品,Daily necessities,mat,席子
+日用品,Daily necessities,cushion,垫子
+日用品,Daily necessities,curtain,窗帘，帘子
+日用品,Daily necessities,suitcase,手提箱
+日用品,Daily necessities,cupboard,碗柜
+日用品,Daily necessities,drawer,抽屉
+日用品,Daily necessities,radio,收音机
+日用品,Daily necessities,microphone,话筒
+日用品,Daily necessities,glue,胶水
+日用品,Daily necessities,thermometer,温度计
+日用品,Daily necessities,bulb,灯泡
+日用品,Daily necessities,switch,开关
+日用品,Daily necessities,plug,插头
+日用品,Daily necessities,telephone,电话
+日用品,Daily necessities,hook,挂钩，衣钩
+日用品,Daily necessities,toothbrush,牙刷
+日用品,Daily necessities,perfume,香水
+日用品,Daily necessities,torch,手电筒，火把
+日用品,Daily necessities,batter,电池
+日用品,Daily necessities,trunk,大衣箱
+日用品,Daily necessities,antique,古玩，古董
+日用品,Daily necessities,cradle,摇篮
+日用品,Daily necessities,television,电视机
+日用品,Daily necessities,bath,浴缸，浴盆
+日用品,Daily necessities,sponge,海绵
+日用品,Daily necessities,eraser,橡皮擦
+日用品,Daily necessities,stool,凳子
+日用品,Daily necessities,clock,时钟
+日用品,Daily necessities,light,灯
+日用品,Daily necessities,lamp,灯
+日用品,Daily necessities,lock,锁
+日用品,Daily necessities,needle,针
+日用品,Daily necessities,thread,线
+日用品,Daily necessities,bathroom,浴室
+日用品,Daily necessities,mirror,镜子
+日用品,Daily necessities,soap,肥皂
+日用品,Daily necessities,towel,毛巾，手巾
+日用品,Daily necessities,lavatory,洗脸盆
+日用品,Daily necessities,toothpaste,牙膏
+日用品,Daily necessities,closet,壁橱
+日用品,Daily necessities,screen,屏风，屏幕
+日用品,Daily necessities,shelf,架子，搁板
+日用品,Daily necessities,rack,行李架
+饮料,Drinks,beer,啤酒
+饮料,Drinks,drink,酒，饮料
+饮料,Drinks,claret,红葡萄酒
+饮料,Drinks,lemonade,柠檬水
+饮料,Drinks,tea,茶
+饮料,Drinks,juice,果汁
+饮料,Drinks,coffee,咖啡
+饮料,Drinks,wine,葡萄酒
+饮料,Drinks,vodka,伏特加
+饮料,Drinks,whisky,威士忌
+饮料,Drinks,cocktail,鸡尾酒
+饮料,Drinks,champagne,香槟
+饮料,Drinks,cider,苹果酒
+饮料,Drinks,brandy,白兰地
+饮料,Drinks,beverage,饮料
+家庭亲属,Family & relatives,wife,妻子
+家庭亲属,Family & relatives,son,儿子
+家庭亲属,Family & relatives,male,男的
+家庭亲属,Family & relatives,father,父亲
+家庭亲属,Family & relatives,female,女的
+家庭亲属,Family & relatives,mother,母亲
+家庭亲属,Family & relatives,single,单身的
+家庭亲属,Family & relatives,foster,领养的
+家庭亲属,Family & relatives,husband,丈夫
+家庭亲属,Family & relatives,family,家庭，亲属
+家庭亲属,Family & relatives,generation,一代人
+家庭亲属,Family & relatives,granny,奶奶；外婆
+家庭亲属,Family & relatives,sister,姐妹
+家庭亲属,Family & relatives,heir,继承人
+家庭亲属,Family & relatives,brother,兄弟
+家庭亲属,Family & relatives,twin,双胞胎的
+家庭亲属,Family & relatives,grandma,奶奶
+家庭亲属,Family & relatives,marriage,结婚
+家庭亲属,Family & relatives,grandson,孙子
+家庭亲属,Family & relatives,daughter,女儿
+家庭亲属,Family & relatives,child,孩子，儿童
+家庭亲属,Family & relatives,couple,夫妻
+家庭亲属,Family & relatives,nephew,侄子
+家庭亲属,Family & relatives,descent,血统
+家庭亲属,Family & relatives,grandad,爷爷
+家庭亲属,Family & relatives,stepfather,继父
+家庭亲属,Family & relatives,son-in-law,女婿
+家庭亲属,Family & relatives,stepmother,继母
+家庭亲属,Family & relatives,aunt,阿姨，舅妈
+家庭亲属,Family & relatives,uncle,叔叔，伯父
+家庭亲属,Family & relatives,niece,侄女，外甥女
+家庭亲属,Family & relatives,cousin,堂兄弟姐妹
+家庭亲属,Family & relatives,parent,父母
+家庭亲属,Family & relatives,daughter-in-law,儿媳
+家庭亲属,Family & relatives,grandfather,祖父
+家庭亲属,Family & relatives,grandmother,祖母
+家庭亲属,Family & relatives,father-in-law,岳父(公公)
+家庭亲属,Family & relatives,mother-in-law,岳母(婆婆)
+家庭亲属,Family & relatives,grandpa,爷爷
+调料,Seasonings,salt,盐
+调料,Seasonings,butter,奶油
+调料,Seasonings,pepper,辣椒
+调料,Seasonings,spice,调料
+调料,Seasonings,vinegar,醋
+调料,Seasonings,sauce,酱油
+调料,Seasonings,oil,油
+调料,Seasonings,salad,色拉
+调料,Seasonings,salad oil,色拉油
+调料,Seasonings,clove,丁香
+调料,Seasonings,cheese,奶酪
+调料,Seasonings,mustard,芥末
+体育运动,Sports,bridge,桥牌
+体育运动,Sports,marathon,马拉松
+体育运动,Sports,pole vault,撑竿跳
+体育运动,Sports,shot put,推铅球
+体育运动,Sports,discus,铁饼
+体育运动,Sports,hammer,链球
+体育运动,Sports,javelin,标枪
+体育运动,Sports,gymnastics,体操
+体育运动,Sports,horizontal bar,单杠
+体育运动,Sports,parallel bars,双杠
+体育运动,Sports,rings,吊环
+体育运动,Sports,weight-lifting,举重
+体育运动,Sports,dash,短跑(美)
+体育运动,Sports,race,赛跑
+体育运动,Sports,high jump,跳高
+体育运动,Sports,long jump,跳远
+体育运动,Sports,throwing,投掷
+体育运动,Sports,walk,竞走
+体育运动,Sports,football,足球
+体育运动,Sports,tennis,网球
+体育运动,Sports,basketball,篮球
+体育运动,Sports,volleyball,排球
+体育运动,Sports,table tennis,乒乓
+体育运动,Sports,baseball,棒球
+体育运动,Sports,wrestling,摔跤
+体育运动,Sports,figure skating,花式溜冰
+体育运动,Sports,bobsleigh,雪橇
+体育运动,Sports,handball,手球
+体育运动,Sports,hockey,曲棍球
+体育运动,Sports,golf,高尔夫球
+体育运动,Sports,cricket,板球
+体育运动,Sports,ice hockey,冰球
+体育运动,Sports,swim,游泳
+体育运动,Sports,freestyle,自由泳
+体育运动,Sports,diving,跳水
+体育运动,Sports,polo,马球；水球
+体育运动,Sports,judo,柔道
+体育运动,Sports,water polo,水球
+体育运动,Sports,rowing,划船，赛艇
+体育运动,Sports,canoe,独木舟
+体育运动,Sports,sailing,帆船运动
+体育运动,Sports,rally,汽车拉力赛
+体育运动,Sports,fencing,击剑
+体育运动,Sports,skiing,滑雪
+体育运动,Sports,skating,滑冰
+体育运动,Sports,boxing,拳击
+体育运动,Sports,soccer,足球
+体育运动,Sports,chess,国际象棋
