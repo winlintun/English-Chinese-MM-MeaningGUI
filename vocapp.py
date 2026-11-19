@@ -49,9 +49,9 @@ SEARCH_PLACEHOLDER = "Search words…"
 CATEGORIES = ("TOEIC", "TextBook")
 
 MYORDBOK_URL = "https://myordbok.com/definition?q="
-# Pronunciation audio: the speech endpoint only answers once a definition
-# page has been fetched (it sets session cookies first).
-SOUND_API_URL = "https://myordbok.com/api/speech"
+# Pronunciation audio: the endpoint rejects requests without this Referer
+# (HTTP 403 "Access denied"), so every fetch must send it.
+SOUND_API_URL = "https://myordbok.com/api/pronunciation"
 SOUND_REFERER = "https://myordbok.com/definition"
 # Background downloads run in a small pool; the pacer below spaces their
 # request starts so the site is not hammered by the parallel workers.
@@ -905,42 +905,13 @@ def fetch_sound(term):
     term = (term or "").strip()
     if not term:
         return None
-    url = SOUND_API_URL + "?" + urllib.parse.urlencode({"q": term, "l": "en"})
+    url = SOUND_API_URL + "?" + urllib.parse.urlencode({"q": term, "tl": "en"})
     try:
-        # The speech endpoint requires the definition page's cookies. Each
-        # worker thread warms up once and then reuses its cookie jar, so a
-        # normal check is a single request.
-        for attempt in (0, 1):
-            warmed = getattr(_sound_local, "warm", False)
-            if not warmed:
-                try:
-                    _pace_remote_request()
-                    _sound_http(MYORDBOK_URL + urllib.parse.quote_plus(term))
-                except Exception:
-                    pass  # an older cookie may still satisfy the speech call
-                else:
-                    _sound_local.warm = True
-                    warmed = True
-            _pace_remote_request()
-            try:
-                data = _sound_http(url, referer=SOUND_REFERER)
-            except Exception:
-                if attempt:
-                    raise
-                # The session may have expired; re-warm and retry once.
-                _sound_local.warm = False
-                continue
-            if _is_mp3(data):
-                return data
-            # An HTML/empty body hints at a stale session; a plain non-MP3
-            # payload just means the word has no audio.
-            stale = not data or data.lstrip()[:1] == b"<"
-            if attempt or not warmed or not stale:
-                return None
-            _sound_local.warm = False
+        _pace_remote_request()
+        data = _sound_http(url, referer=SOUND_REFERER)
     except Exception:
         return None
-    return None
+    return data if _is_mp3(data) else None
 
 
 def get_sound(word_id):
