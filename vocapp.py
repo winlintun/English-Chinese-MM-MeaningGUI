@@ -5,6 +5,7 @@ import html
 import http.cookiejar
 import json
 import os
+import pathlib
 import re
 import sqlite3
 import sys
@@ -51,6 +52,13 @@ SOUND_API_URL = "https://myordbok.com/api/speech"
 SOUND_REFERER = "https://myordbok.com/definition"
 SOUND_RETRY_DELAY = 1.0  # seconds between downloads — be polite to the site
 ORNAGAI_URL = "https://www.ornagai.com/index.php/api/word/?q="
+# Offline English→Myanmar dictionary (optional Ornagai export). When present
+# it answers lookups instantly and without network; the online services stay
+# as fallback. Override the location with VOCAPP_ORNAGAI_DB. Like the fonts,
+# it may live next to vocapp.py while VOCAPP_DATA_DIR points elsewhere.
+_or_ornagai_paths = [os.path.join(p, "ornagai.db") for p in (DATA_DIR, BUNDLE_DIR)]
+ORNAGAI_DB = os.environ.get("VOCAPP_ORNAGAI_DB") or next(
+    (p for p in _or_ornagai_paths if os.path.isfile(p)), _or_ornagai_paths[0])
 MDBG_URL = "https://www.mdbg.net/chinese/dictionary?client=opensearch-wdb-v1&wdqb="
 HTTP_HEADERS = {
     "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -503,7 +511,146 @@ def _myordbok_og_meanings(page):
     return [p.strip() for p in re.split(r"[,၊]", content[start:]) if p.strip()]
 
 
+_MYANMAR_CONNECTIVES = ("သို့မဟုတ်", "ထို့အပြင်", "ပြီးနောက်")
+
+
+def _sqlite_ro_uri(path):
+    """Read-only file: URI for SQLite, robust to %, ?, # in the path."""
+    return pathlib.Path(path).resolve().as_uri() + "?mode=ro"
+
+
+def myanmar_definition_fragments(definition, limit=2):
+    """First distinct Myanmar meaning fragments of a dictionary definition.
+
+    Ornagai separates synonyms with '၊' / ',' and ends a sense with '။';
+    leading connectives ("or", "also") are dropped so a fragment starts
+    with the meaning itself."""
+    fragments = []
+    for chunk in re.split(r"[၊,;、]|။", definition or ""):
+        chunk = chunk.strip(" .…")
+        for connective in _MYANMAR_CONNECTIVES:
+            if chunk.startswith(connective + " "):
+                chunk = chunk[len(connective):].strip()
+        # a split inside a parenthetical leaves an unbalanced fragment
+        # ("(အထူးသဖြင့် မုန့်") — keep only the part before the bracket
+        if chunk.count("(") != chunk.count(")"):
+            chunk = chunk.split("(")[0].strip(" .…")
+        if chunk.count("[") != chunk.count("]"):
+            chunk = chunk.split("[")[0].strip(" .…")
+        if not chunk or not any("\u1000" <= ch <= "\u109f" for ch in chunk):
+            continue
+        if chunk not in fragments:
+            fragments.append(chunk)
+        if len(fragments) >= limit:
+            break
+    return fragments
+
+
+# irregular short forms that generic -s/-es folding would mangle
+_SHORT_FOLDS = {"does": "do", "goes": "go", "has": "have", "its": "it"}
+# -ed words that are not past tenses: dropping the "d" would hit an
+# unrelated word (seed→see, shed→she)
+_NO_ED_FOLD = frozenset("""
+    breed creed deed feed heed need reed seed speed steed weed
+    shed sled
+""".split())
+
+
+def _word_variants(term):
+    """Cheap inflection folding: notes→note, boxes→box, running→run.
+
+    Order matters: the first variant that exists wins, so the likely form
+    comes before the bare stem ("used" → "use" before "us"). Short words
+    (is, us, as) are left alone — dropping the "s" would hit a letter."""
+    variants = [term]
+    if term in _SHORT_FOLDS:
+        variants.append(_SHORT_FOLDS[term])
+    if term.endswith("ies") and len(term) > 4:
+        variants.append(term[:-3] + "y")     # studies→study
+    if term.endswith("ied") and len(term) > 4:
+        variants.append(term[:-3] + "y")     # tried→try
+    if term.endswith("s") and not term.endswith("ss") and len(term) > 3:
+        variants.append(term[:-1])          # notes→note
+    if term.endswith("es") and len(term) > 3:
+        variants.append(term[:-2])          # boxes→box
+    if term.endswith("ing") and len(term) > 5:
+        stem = term[:-3]
+        variants.append(stem + "e")         # making→make
+        variants.append(stem)
+        if len(stem) > 2 and stem[-1] == stem[-2]:
+            variants.append(stem[:-1])      # running→run
+    if term.endswith("ed") and len(term) > 3 and term not in _NO_ED_FOLD:
+        variants.append(term[:-1])          # used→use, hated→hate, tied→tie
+        if len(term) > 4:
+            stem = term[:-2]
+            variants.append(stem)
+            if len(stem) > 2 and stem[-1] == stem[-2]:
+                variants.append(stem[:-1])  # stopped→stop
+    seen = []
+    for variant in variants:
+        if variant and variant not in seen:
+            seen.append(variant)
+    return seen
+
+
+def lookup_myanmar_local(term):
+    """Offline English→Myanmar lookup in the optional Ornagai export.
+
+    Returns up to two Myanmar meaning fragments joined with ' ၊ ', or None
+    when the dictionary is absent or has no entry (callers then fall back
+    to the online services)."""
+    term = (term or "").strip().lower()
+    if not term:
+        return None
+    path = ORNAGAI_DB
+    if not os.path.isfile(path):
+        return None
+    uri = _sqlite_ro_uri(path)
+    rows = []
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=2)
+    except sqlite3.Error:
+        return None
+    try:
+        for candidate in _word_variants(term):
+            rows = conn.execute(
+                "SELECT s.pos, s.definition_my FROM entries e "
+                "JOIN senses s ON s.entry_id = e.id "
+                "WHERE e.headword_lc = ? ORDER BY s.sense_no LIMIT 3",
+                (candidate,)).fetchall()
+            if rows:
+                break
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    fragments = []
+    for _pos, definition in rows:
+        for piece in myanmar_definition_fragments(definition):
+            if piece not in fragments:
+                fragments.append(piece)
+        if len(fragments) >= 2:
+            break
+    return " ၊ ".join(fragments[:2]) or None
+
+
+def lookup_myanmar_detailed(term):
+    """(definition, source) — source is 'offline', 'online', or None.
+
+    The UI uses the source to say where the answer came from, so the
+    local-dictionary path is tried first and reported honestly."""
+    local = lookup_myanmar_local(term)
+    if local:
+        return local, "offline"
+    online = _lookup_myanmar_online(term)
+    return (online, "online") if online else (None, None)
+
+
 def lookup_myanmar(term):
+    return lookup_myanmar_detailed(term)[0]
+
+
+def _lookup_myanmar_online(term):
     try:
         page = _http_get(MYORDBOK_URL + urllib.parse.quote_plus(term))
     except Exception:
@@ -1217,7 +1364,7 @@ EXPORT_FILTER = ";;".join(filter_label for _fn, filter_label in EXPORT_FORMATS.v
 
 
 class _LookupSignals(QObject):
-    finished = Signal(str, object, object)
+    finished = Signal(str, object, str, object)   # english, mm, mm source, cn
 
 
 class _SoundSignals(QObject):
@@ -1935,39 +2082,52 @@ class VocabApp(QMainWindow):
             return
         self._lookup_inflight.add(eng)
         if needs_mm:
-            self._set_hint(self.mm_hint, "Searching online…", COLORS["muted"])
+            local = os.path.isfile(ORNAGAI_DB)
+            self._set_hint(self.mm_hint, "Searching dictionary…" if local
+                           else "Searching online…", COLORS["muted"])
         if needs_cn:
             self._set_hint(self.cn_hint, "Searching online…", COLORS["muted"])
-        self.status_label.setText(f"Looking up “{eng}” online…")
+        self.status_label.setText(f"Looking up “{eng}”…")
         threading.Thread(target=self._lookup_worker, args=(eng, needs_mm, needs_cn),
                          daemon=True).start()
 
     def _lookup_worker(self, eng, needs_mm, needs_cn):
-        mm = lookup_myanmar(eng) if needs_mm else None
-        cn = lookup_chinese(eng) if needs_cn else None
-        self.lookup_signals.finished.emit(eng, mm, cn)
+        mm, mm_source, cn = None, "", None
+        try:
+            if needs_mm:
+                mm, mm_source = lookup_myanmar_detailed(eng)
+                mm_source = mm_source or ""
+            if needs_cn:
+                cn = lookup_chinese(eng)
+        except Exception:
+            pass
+        finally:
+            # always emit, otherwise the word stays in _lookup_inflight
+            self.lookup_signals.finished.emit(eng, mm, mm_source, cn)
 
-    def _apply_lookup(self, eng, mm, cn):
+    def _apply_lookup(self, eng, mm, mm_source, cn):
         self._lookup_inflight.discard(eng)
         if normalize_myanmar_text(self.ent_eng.text()) != eng:
             return
         filled = []
         if mm and not self.ent_mm.text().strip():
             self.ent_mm.setText(normalize_myanmar_text(mm))
-            self._set_hint(self.mm_hint, "Found online ✓", COLORS["accent_dark"])
+            self._set_hint(self.mm_hint,
+                           "Found offline ✓" if mm_source == "offline"
+                           else "Found online ✓", COLORS["accent_dark"])
             filled.append("Myanmar")
-        elif self.mm_hint.text() == "Searching online…":
+        elif self.mm_hint.text().startswith("Searching "):
             self._set_hint(self.mm_hint, "Not found — add manually", COLORS["danger_text"])
         if cn and not self.ent_cn.text().strip():
             self.ent_cn.setText(normalize_chinese_entry(cn))
             self._set_hint(self.cn_hint, "Found online ✓", COLORS["accent_dark"])
             filled.append("Chinese")
-        elif self.cn_hint.text() == "Searching online…":
+        elif self.cn_hint.text().startswith("Searching "):
             self._set_hint(self.cn_hint, "Not found — add manually", COLORS["danger_text"])
         if filled:
             self.status_label.setText(f"Auto-filled {' & '.join(filled)} for “{eng}”")
         else:
-            self.status_label.setText(f"No online result found for “{eng}” — add it manually")
+            self.status_label.setText(f"No result found for “{eng}” — add it manually")
 
     # ------------------------------------------------------------------ #
     # Pronunciation sounds: downloads store MP3 bytes in the words.sound

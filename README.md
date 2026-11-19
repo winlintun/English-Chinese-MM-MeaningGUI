@@ -104,14 +104,31 @@ gunzip cedict.txt.gz
 # 2. Import the dictionary + curated glosses and rebuild the breakdown rows
 python3 build_chinese_breakdown.py --cedict cedict.txt
 
-# 3. Optional: auto-suggest Myanmar glosses via MyOrdbok for the most frequent
-#    characters (online, ~1 s per character). Results are marked "auto" in the
-#    UI until reviewed.
-python3 build_chinese_breakdown.py --suggest-mdbg --suggest-limit 300
+# 3. Optional: auto-suggest Myanmar glosses from the local Ornagai dictionary
+#    (offline, instant). Results are marked "auto" in the UI until reviewed.
+#    Without ornagai.db, the online MyOrdbok suggester still works:
+#    --suggest-mdbg --suggest-limit 300
+python3 build_chinese_breakdown.py --suggest-ornagai --suggest-limit 300
+python3 build_chinese_breakdown.py --suggest-ornagai --resuggest  # redo source='auto'
 
 # 4. Only recompute the breakdown rows (after editing data/hanzi_myanmar.csv)
 python3 build_chinese_breakdown.py --rebuild-only
 ```
+
+- **Local English→Myanmar dictionary (`ornagai.db`)** — optional, not
+  committed (56 MB third-party export). Put it next to `vocapp.py` or point
+  `VOCAPP_ORNAGAI_DB` / `--ornagai PATH` at it. When present:
+  - `lookup_myanmar()` (the app's auto-fill) answers offline first, then
+    falls back to MyOrdbok; no network delay, no Cloudflare blocks.
+  - `--suggest-ornagai` fills character glosses from CC-CEDICT's English
+    glosses. It skips curated/tombstoned rows, prefers ordinary senses over
+    capitalised names, and stores the result as `source='auto'`
+    (reviewable in the UI). `--resuggest` regenerates every existing auto row
+    (ignoring `--suggest-limit`) and clears auto glosses the dictionary cannot
+    back any more; curated rows are still untouched.
+  - Data shape: `entries(id, headword, headword_lc)` →
+    `senses(entry_id, sense_no, pos, pron_my, definition_my)` →
+    `examples(text_en)`.
 
 - `data/hanzi_myanmar.csv` (`hanzi,pinyin,myanmar,reading_note`) holds the
   human-curated Myanmar glosses; curated rows are never overwritten by

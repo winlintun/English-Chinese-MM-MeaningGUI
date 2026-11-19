@@ -20,6 +20,9 @@ venv/
 *.db-shm
 vocabulary_backup.db
 vocabulary_backup.db.sha256
+# Third-party English→Myanmar dictionary export (~56 MB) — optional local
+# data, not committed; see README.md
+ornagai.db
 
 # Machine-local tool settings
 .qoder/
